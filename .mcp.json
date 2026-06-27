@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "memfault": {
+      "type": "http",
+      "url": "https://app.memfault.com/mcp"
+    }
+  }
+}
