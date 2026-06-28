@@ -17,6 +17,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/logging/log.h>
 
@@ -68,6 +69,7 @@ static size_t on_uart_rx(const uint8_t *in, size_t in_len,
 			 uint8_t *out, size_t out_size)
 {
 	size_t n = MIN(in_len, out_size);
+	
 
 	memcpy(out, in, n);
 	return n;
@@ -81,6 +83,55 @@ static size_t on_ble_rx(const uint8_t *in, size_t in_len,
 
 	memcpy(out, in, n);
 	return n;
+}
+
+/* --- Status LEDs --------------------------------------------------------- */
+/*
+ * One LED per state, driven mutually exclusively (enabling one turns the others
+ * off). The physical LED for each role is chosen per-board via the
+ * led-connected / led-advertising / led-error aliases in the board overlay, so
+ * each board can pick appropriate LEDs/colours (e.g. the XIAO uses green/blue/
+ * red). _GET_OR keeps it building if a board omits a role (that LED is then a
+ * no-op). Active-low polarity is taken from devicetree, so "on" is logical.
+ */
+enum status_state {
+	STATUS_CONNECTED,
+	STATUS_ADVERTISING,
+	STATUS_ERROR,
+};
+
+static const struct gpio_dt_spec status_leds[] = {
+	[STATUS_CONNECTED]   = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led_connected), gpios, {0}),
+	[STATUS_ADVERTISING] = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led_advertising), gpios, {0}),
+	[STATUS_ERROR]       = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led_error), gpios, {0}),
+};
+
+static void leds_init(void)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(status_leds); i++) {
+		const struct gpio_dt_spec *led = &status_leds[i];
+
+		if (led->port == NULL) {
+			continue;  /* alias not defined on this board */
+		}
+		if (!gpio_is_ready_dt(led)) {
+			LOG_ERR("status LED %u not ready", (unsigned int)i);
+			continue;
+		}
+		gpio_pin_configure_dt(led, GPIO_OUTPUT_INACTIVE);
+	}
+}
+
+/* Light the LED for `state` and turn the others off. */
+static void set_status_leds(enum status_state state)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(status_leds); i++) {
+		const struct gpio_dt_spec *led = &status_leds[i];
+
+		if (led->port != NULL) {
+			gpio_pin_set_dt(led, i == state);
+		}
+	}
 }
 
 /* --- BLE ----------------------------------------------------------------- */
@@ -108,9 +159,11 @@ static void advertising_start(void)
 				  sd, ARRAY_SIZE(sd));
 	if (err) {
 		LOG_ERR("Advertising failed to start (err %d)", err);
+		set_status_leds(STATUS_ERROR);
 		return;
 	}
 	LOG_INF("Advertising as \"%s\"", DEVICE_NAME);
+	set_status_leds(STATUS_ADVERTISING);
 }
 
 static void on_connected(struct bt_conn *conn, uint8_t err)
@@ -131,6 +184,8 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 	k_mutex_lock(&conn_mutex, K_FOREVER);
 	current_conn = bt_conn_ref(conn);
 	k_mutex_unlock(&conn_mutex);
+
+	set_status_leds(STATUS_CONNECTED);
 }
 
 static void on_disconnected(struct bt_conn *conn, uint8_t reason)
@@ -376,15 +431,19 @@ int main(void)
 
 	LOG_INF("nrfProxy: UART1 -> BLE NUS bridge starting");
 
+	leds_init();
+
 	err = uart_init();
 	if (err) {
 		LOG_ERR("UART init failed (%d)", err);
+		set_status_leds(STATUS_ERROR);
 		return 0;
 	}
 
 	err = bt_enable(NULL);
 	if (err) {
 		LOG_ERR("bt_enable failed (%d)", err);
+		set_status_leds(STATUS_ERROR);
 		return 0;
 	}
 	LOG_INF("Bluetooth initialized");
@@ -392,6 +451,7 @@ int main(void)
 	err = bt_nus_init(&nus_cb);
 	if (err) {
 		LOG_ERR("bt_nus_init failed (%d)", err);
+		set_status_leds(STATUS_ERROR);
 		return 0;
 	}
 

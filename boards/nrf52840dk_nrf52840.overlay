@@ -12,6 +12,15 @@
 
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
 
+/ {
+	/* Status-LED roles -> three of the DK's LEDs (LED2/LED3/LED4). */
+	aliases {
+		led-connected = &led1;
+		led-advertising = &led2;
+		led-error = &led3;
+	};
+};
+
 &pinctrl {
 	uart1_default: uart1_default {
 		group1 {
