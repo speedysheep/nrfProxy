@@ -105,6 +105,10 @@ ref-counting discipline for any new code that touches `current_conn`.
 
 ## Conventions / gotchas
 
+- **Git is the user's job — but remind, don't run.** The user handles all git
+  themselves (commits, branches, pushes); do not run git write commands. It *is* helpful
+  to remind them to **commit** at a good stopping point, and to **create a new branch** when
+  we switch to a different topic/task. Surface the suggestion; let them do it.
 - Code style is Zephyr/Linux kernel: tabs, `LOG_*` for output, K_*_DEFINE static objects.
 - **Per-board Kconfig:** `prj.conf` holds the shared config; board-specific deltas go in
   `boards/<board>.conf`, which Zephyr auto-merges on top (same naming as the overlays).
