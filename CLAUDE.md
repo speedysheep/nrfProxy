@@ -168,9 +168,11 @@ ref-counting discipline for any new code that touches `current_conn`.
   `on_connected` **cancels** `adv_slow_work` (advertising already stopped); the handler also
   re-checks `current_conn` to guard the connect-vs-timer race. The USB CDC-ACM console +
   logging are dropped in the production build via `prod.conf` (see "Production build") so the
-  SoC can idle between adv events. Remaining battery win not yet done: enable the main
-  **DC/DC regulator** (devicetree `&reg1` mode DCDC; ~halves radio current, needs the board
-  inductor).
+  SoC can idle between adv events. The XIAO overlay enables the main **DC/DC regulator**
+  (`&reg1` mode `NRF5X_REG_MODE_DCDC`) for lower active/radio current — it has the required
+  DCC/DEC4 inductor populated and VDDH tied to VDD (normal-voltage mode, so REG0 is unused).
+  A board lacking that inductor must **not** set this (it would brown out); it's per-board,
+  hence in the overlay, not `prj.conf`.
 - UART1 pins are per-board (in each overlay); default baud **115200** (`current-speed`).
   Common ground with the serial source is required.
   - **nRF52840 DK:** RX = P1.01, TX = P1.02. Console/logs on the J-Link VCOM (uart0).
@@ -190,9 +192,9 @@ The bidirectional bridge is feature-complete and **compile-verified for both boa
 NUS bridging both directions; per-board overlays + `.conf` fragments (DK debug / XIAO
 production); role-based status LEDs; per-device identity (stable static-random address +
 `nrfProxy-XXXX` name + manufacturer-data tag from the chip's hardware ID, see Conventions);
-power tuning (two-phase fast→slow advertising + low-duty advertising LED blink); and the two
-board-specific runtime bugs above (uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and
-documented.
+power tuning (two-phase fast→slow advertising + low-duty advertising LED blink, XIAO DC/DC
+regulator, and a logging/USB-free `prod.conf` production build); and the two board-specific
+runtime bugs above (uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and documented.
 
 Open threads / likely next work:
 - **Interception hooks are pass-through stubs.** `on_uart_rx` / `on_ble_rx` just copy
