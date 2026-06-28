@@ -108,8 +108,35 @@ static const struct gpio_dt_spec status_leds[] = {
 	[STATUS_ERROR]       = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led_error), gpios, {0}),
 };
 
+static enum status_state current_status;
+
+/* The advertising LED blinks at a low duty cycle rather than sitting solid-on:
+ * a continuously-lit LED draws milliamps and would dominate the battery budget
+ * next to sub-100uA advertising. Connected/error states stay solid. */
+#define ADV_BLINK_ON   K_MSEC(30)
+#define ADV_BLINK_OFF  K_MSEC(2000)
+
+static struct k_work_delayable adv_blink_work;
+
+static void adv_blink_handler(struct k_work *work)
+{
+	const struct gpio_dt_spec *led = &status_leds[STATUS_ADVERTISING];
+	static bool on;
+
+	/* Stop if we've left the advertising state, or this board has no LED. */
+	if (current_status != STATUS_ADVERTISING || led->port == NULL) {
+		return;
+	}
+
+	on = !on;
+	gpio_pin_set_dt(led, on);
+	k_work_reschedule(&adv_blink_work, on ? ADV_BLINK_ON : ADV_BLINK_OFF);
+}
+
 static void leds_init(void)
 {
+	k_work_init_delayable(&adv_blink_work, adv_blink_handler);
+
 	for (size_t i = 0; i < ARRAY_SIZE(status_leds); i++) {
 		const struct gpio_dt_spec *led = &status_leds[i];
 
@@ -124,14 +151,29 @@ static void leds_init(void)
 	}
 }
 
-/* Light the LED for `state` and turn the others off. */
+/* Drive the LEDs for `state`: connected/error are solid, advertising blinks at
+ * a low duty cycle (see adv_blink_handler). Turns the other roles off. */
 static void set_status_leds(enum status_state state)
 {
+	current_status = state;
+
+	/* All off first, then drive the active role. */
 	for (size_t i = 0; i < ARRAY_SIZE(status_leds); i++) {
 		const struct gpio_dt_spec *led = &status_leds[i];
 
 		if (led->port != NULL) {
-			gpio_pin_set_dt(led, i == state);
+			gpio_pin_set_dt(led, 0);
+		}
+	}
+
+	if (state == STATUS_ADVERTISING) {
+		k_work_reschedule(&adv_blink_work, K_NO_WAIT);
+	} else {
+		const struct gpio_dt_spec *led = &status_leds[state];
+
+		k_work_cancel_delayable(&adv_blink_work);
+		if (led->port != NULL) {
+			gpio_pin_set_dt(led, 1);
 		}
 	}
 }
@@ -219,6 +261,20 @@ static void identity_init(void)
 	memcpy(&mfg_data[4], hwid, 4);
 }
 
+/* Two-phase advertising for power: advertise at the fast interval for quick
+ * discovery/connection right after boot or a disconnect, then drop to the slow
+ * (~1 s) interval to cut standby radio current. adv_slow_work makes the switch
+ * after ADV_FAST_DURATION. */
+#define ADV_FAST_DURATION K_SECONDS(30)
+
+static const struct bt_le_adv_param adv_param_slow = BT_LE_ADV_PARAM_INIT(
+	BT_LE_ADV_OPT_CONN,
+	BT_GAP_ADV_SLOW_INT_MIN,   /* 1.0 s */
+	BT_GAP_ADV_SLOW_INT_MAX,   /* 1.2 s */
+	NULL);
+
+static struct k_work_delayable adv_slow_work;
+
 static void advertising_start(void)
 {
 	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad),
@@ -228,8 +284,37 @@ static void advertising_start(void)
 		set_status_leds(STATUS_ERROR);
 		return;
 	}
-	LOG_INF("Advertising as \"%s\"", device_name);
+	LOG_INF("Advertising as \"%s\" (fast)", device_name);
 	set_status_leds(STATUS_ADVERTISING);
+	k_work_reschedule(&adv_slow_work, ADV_FAST_DURATION);
+}
+
+/* Restart advertising at the slow interval. Skipped if a connection arrived in
+ * the meantime (on_connected also cancels this work, but guard the race). */
+static void adv_slow_handler(struct k_work *work)
+{
+	int err;
+
+	k_mutex_lock(&conn_mutex, K_FOREVER);
+	bool connected = current_conn != NULL;
+	k_mutex_unlock(&conn_mutex);
+	if (connected) {
+		return;
+	}
+
+	err = bt_le_adv_stop();
+	if (err) {
+		LOG_WRN("adv stop failed (%d)", err);
+		return;
+	}
+	err = bt_le_adv_start(&adv_param_slow, ad, ARRAY_SIZE(ad),
+			      sd, ARRAY_SIZE(sd));
+	if (err) {
+		LOG_ERR("slow advertising failed to start (err %d)", err);
+		set_status_leds(STATUS_ERROR);
+		return;
+	}
+	LOG_INF("Advertising (slow)");
 }
 
 static void on_connected(struct bt_conn *conn, uint8_t err)
@@ -246,6 +331,9 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 	LOG_INF("Connected: %s", addr);
+
+	/* Advertising stopped on connect; don't let the fast->slow switch fire. */
+	k_work_cancel_delayable(&adv_slow_work);
 
 	k_mutex_lock(&conn_mutex, K_FOREVER);
 	current_conn = bt_conn_ref(conn);
@@ -498,6 +586,7 @@ int main(void)
 	LOG_INF("nrfProxy: UART1 -> BLE NUS bridge starting");
 
 	leds_init();
+	k_work_init_delayable(&adv_slow_work, adv_slow_handler);
 
 	err = uart_init();
 	if (err) {

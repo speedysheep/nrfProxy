@@ -134,7 +134,21 @@ ref-counting discipline for any new code that touches `current_conn`.
   `led-connected` / `led-advertising` / `led-error` aliases, which **each board overlay
   must define** (XIAO: green/blue/red = led1/led2/led0; DK: led1/led2/led3). They use
   `GPIO_DT_SPEC_GET_OR`, so a board that omits a role silently gets a dark LED — define all
-  three when adding a board.
+  three when adding a board. Connected/error are **solid**; advertising **blinks at a low
+  duty cycle** (`adv_blink_handler`, ~30 ms on / 2 s off) — a solid LED would dominate the
+  battery budget next to sub-100uA advertising. `set_status_leds()` drives the blink via
+  `adv_blink_work`; it tracks state in `current_status` so the work self-stops on leaving
+  the advertising state.
+- **Power: two-phase advertising.** `advertising_start()` advertises at the fast interval
+  (`BT_LE_ADV_CONN_FAST_2`, ~100 ms) for quick discovery, then `adv_slow_work` switches to
+  a slow ~1 s interval (`adv_param_slow`, `BT_GAP_ADV_SLOW_INT_*`) after
+  `ADV_FAST_DURATION` (30 s) to cut standby radio current. The switch does
+  `bt_le_adv_stop()` + `bt_le_adv_start()` (interval can't be changed in place). On connect,
+  `on_connected` **cancels** `adv_slow_work` (advertising already stopped); the handler also
+  re-checks `current_conn` to guard the connect-vs-timer race. Bigger battery wins not yet
+  done: enable the main **DC/DC regulator** (devicetree `&reg1` mode DCDC; ~halves radio
+  current, needs the board inductor) and, for a true battery build, drop the USB CDC-ACM
+  console/logging so the SoC can idle between adv events.
 - UART1 pins are per-board (in each overlay); default baud **115200** (`current-speed`).
   Common ground with the serial source is required.
   - **nRF52840 DK:** RX = P1.01, TX = P1.02. Console/logs on the J-Link VCOM (uart0).
@@ -153,7 +167,8 @@ The bidirectional bridge is feature-complete and **compile-verified for both boa
 (hardware flashing/testing is done by the user, not in-session). Done so far: UART1⇄BLE
 NUS bridging both directions; per-board overlays + `.conf` fragments (DK debug / XIAO
 production); role-based status LEDs; per-device identity (stable static-random address +
-`nrfProxy-XXXX` name from the chip's hardware ID, see Conventions); and the two
+`nrfProxy-XXXX` name + manufacturer-data tag from the chip's hardware ID, see Conventions);
+power tuning (two-phase fast→slow advertising + low-duty advertising LED blink); and the two
 board-specific runtime bugs above (uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and
 documented.
 
