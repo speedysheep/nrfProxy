@@ -20,6 +20,9 @@ test with the *nRF Connect for Mobile* or *nRF Toolbox* apps.
 
 - `src/main.c` — entire application (UART async driver, BLE/NUS, the bridge logic).
 - `prj.conf` — Kconfig: BLE peripheral + NUS, async UART, MTU/throughput tuning, debug flags.
+- `prod.conf` — optional **production** fragment for the XIAO (battery use): drops logging
+  and the USB CDC-ACM console. Applied via `EXTRA_CONF_FILE`, *not* auto-merged — see
+  "Production build" below.
 - `boards/<board>_<qualifier>.overlay` — per-board: enables UART1 and assigns its pins
   (`nrf52840dk_nrf52840.overlay`, `xiao_ble_nrf52840.overlay`). Add one per new board.
 - `CMakeLists.txt` — standard Zephyr app boilerplate; only `src/main.c` is compiled.
@@ -49,6 +52,24 @@ west build -b nrf52840dk/nrf52840 -d "C:\Users\extra\projects\nrfProxy\build" "C
   keep `-d <build>`.
 - Flash: `west flash -d build`, or drag `build/merged.hex` onto the J-Link drive.
 - First full build takes a few minutes (BLE stack); run it in the background.
+
+### Production build (XIAO, no console/logging)
+The default XIAO build keeps the USB CDC-ACM console + logging (handy for debugging — use
+build dir `build_xiao`). For battery/production, layer `prod.conf` on top with
+`EXTRA_CONF_FILE` into a **separate** build dir so the debug build is untouched:
+
+```powershell
+west build -b xiao_ble/nrf52840 --pristine -d "C:\Users\extra\projects\nrfProxy\build_xiao_prod" `
+  "C:\Users\extra\projects\nrfProxy" -- -DEXTRA_CONF_FILE=prod.conf
+```
+
+`prod.conf` sets `CONFIG_LOG=n` and `CONFIG_BOARD_SERIAL_BACKEND_CDC_ACM=n` (+ `CONSOLE`/
+`UART_CONSOLE` off), which drops the USB device stack and console bring-up so the SoC can
+idle between advertising events. UART1/NUS are unaffected (verify `CONFIG_UART_1_ASYNC=y`,
+`CONFIG_SERIAL=y` still set). Flash the UF2 from `build_xiao_prod`. There are **no logs** on
+this build — reflash the plain `build_xiao` build to debug. `EXTRA_CONF_FILE` is per-command
+(not remembered), so a non-pristine rebuild of that dir keeps it via CMakeCache; a
+`--pristine` rebuild must pass the flag again.
 
 ### The #1 gotcha: wrong SDK ⇒ `CONFIG_BT_NUS` undefined
 `BT_NUS` / `bluetooth/services/nus.h` live in the **`nrf` module of nRF Connect SDK**,
@@ -145,10 +166,11 @@ ref-counting discipline for any new code that touches `current_conn`.
   `ADV_FAST_DURATION` (30 s) to cut standby radio current. The switch does
   `bt_le_adv_stop()` + `bt_le_adv_start()` (interval can't be changed in place). On connect,
   `on_connected` **cancels** `adv_slow_work` (advertising already stopped); the handler also
-  re-checks `current_conn` to guard the connect-vs-timer race. Bigger battery wins not yet
-  done: enable the main **DC/DC regulator** (devicetree `&reg1` mode DCDC; ~halves radio
-  current, needs the board inductor) and, for a true battery build, drop the USB CDC-ACM
-  console/logging so the SoC can idle between adv events.
+  re-checks `current_conn` to guard the connect-vs-timer race. The USB CDC-ACM console +
+  logging are dropped in the production build via `prod.conf` (see "Production build") so the
+  SoC can idle between adv events. Remaining battery win not yet done: enable the main
+  **DC/DC regulator** (devicetree `&reg1` mode DCDC; ~halves radio current, needs the board
+  inductor).
 - UART1 pins are per-board (in each overlay); default baud **115200** (`current-speed`).
   Common ground with the serial source is required.
   - **nRF52840 DK:** RX = P1.01, TX = P1.02. Console/logs on the J-Link VCOM (uart0).
