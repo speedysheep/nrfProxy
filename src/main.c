@@ -112,11 +112,16 @@ static enum status_state current_status;
 
 /* The advertising LED blinks at a low duty cycle rather than sitting solid-on:
  * a continuously-lit LED draws milliamps and would dominate the battery budget
- * next to sub-100uA advertising. Connected/error states stay solid. */
-#define ADV_BLINK_ON   K_MSEC(30)
-#define ADV_BLINK_OFF  K_MSEC(2000)
+ * next to sub-100uA advertising. Connected/error states stay solid. The gap
+ * between blinks tracks the advertising phase — brisk during fast advertising,
+ * lazy once we drop to the slow interval — so the fast->slow switch is visible
+ * on the LED even when the (USB CDC-ACM) console isn't. */
+#define ADV_BLINK_ON        K_MSEC(30)
+#define ADV_BLINK_OFF_FAST  K_MSEC(300)
+#define ADV_BLINK_OFF_SLOW  K_MSEC(2000)
 
 static struct k_work_delayable adv_blink_work;
+static bool adv_slow_phase;  /* false = fast advertising, true = slow */
 
 static void adv_blink_handler(struct k_work *work)
 {
@@ -130,7 +135,9 @@ static void adv_blink_handler(struct k_work *work)
 
 	on = !on;
 	gpio_pin_set_dt(led, on);
-	k_work_reschedule(&adv_blink_work, on ? ADV_BLINK_ON : ADV_BLINK_OFF);
+	k_work_reschedule(&adv_blink_work,
+			  on ? ADV_BLINK_ON :
+			       (adv_slow_phase ? ADV_BLINK_OFF_SLOW : ADV_BLINK_OFF_FAST));
 }
 
 static void leds_init(void)
@@ -285,6 +292,7 @@ static void advertising_start(void)
 		return;
 	}
 	LOG_INF("Advertising as \"%s\" (fast)", device_name);
+	adv_slow_phase = false;   /* brisk LED blink during the fast phase */
 	set_status_leds(STATUS_ADVERTISING);
 	k_work_reschedule(&adv_slow_work, ADV_FAST_DURATION);
 }
@@ -315,6 +323,7 @@ static void adv_slow_handler(struct k_work *work)
 		return;
 	}
 	LOG_INF("Advertising (slow)");
+	adv_slow_phase = true;   /* LED drops to the lazy blink */
 }
 
 static void on_connected(struct bt_conn *conn, uint8_t err)

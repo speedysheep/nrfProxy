@@ -156,9 +156,14 @@ ref-counting discipline for any new code that touches `current_conn`.
   must define** (XIAO: green/blue/red = led1/led2/led0; DK: led1/led2/led3). They use
   `GPIO_DT_SPEC_GET_OR`, so a board that omits a role silently gets a dark LED — define all
   three when adding a board. Connected/error are **solid**; advertising **blinks at a low
-  duty cycle** (`adv_blink_handler`, ~30 ms on / 2 s off) — a solid LED would dominate the
-  battery budget next to sub-100uA advertising. `set_status_leds()` drives the blink via
-  `adv_blink_work`; it tracks state in `current_status` so the work self-stops on leaving
+  duty cycle** (`adv_blink_handler`, ~30 ms on) — a solid LED would dominate the battery
+  budget next to sub-100uA advertising. The off-gap is **phase-aware**: brisk
+  (`ADV_BLINK_OFF_FAST`, ~300 ms) during the fast-advertising phase and lazy
+  (`ADV_BLINK_OFF_SLOW`, ~2 s) once the switch to slow advertising happens, via the
+  `adv_slow_phase` flag (set false in `advertising_start`, true in `adv_slow_handler`). So
+  the fast→slow transition is **visible on the LED** even when the console isn't — useful on
+  the XIAO, whose USB log is unreliable (see below). `set_status_leds()` drives the blink via
+  `adv_blink_work` and tracks state in `current_status` so the work self-stops on leaving
   the advertising state.
 - **Power: two-phase advertising.** `advertising_start()` advertises at the fast interval
   (`BT_LE_ADV_CONN_FAST_2`, ~100 ms) for quick discovery, then `adv_slow_work` switches to
@@ -181,6 +186,15 @@ ref-counting discipline for any new code that touches `current_conn`.
     Its `boards/xiao_ble_nrf52840.conf` bumps `CONFIG_UDC_BUF_POOL_SIZE` (default 1024 is
     too small for the control transfers a **Windows** host makes at enumeration → `udc:
     Failed to allocate net_buf …, ep 0x80`; Zephyr issue #85108).
+    **USB log visibility quirk:** the XIAO console only exists while USB is enumerated, and
+    during boot the bus resets/re-enumerates (`udc_nrf: Reset` / `SUSPEND` / `RESUMING`),
+    which on Windows changes the COM port and **drops the terminal session** — so you often
+    capture only the first ~0.2 s of logs and *nothing after*. Later lines (e.g.
+    `Advertising (slow)` at 30 s) are still emitted; the terminal just isn't attached.
+    To see them, (re)open the serial port a couple seconds *after* boot/enumeration settles
+    and keep it open — or rely on the phase-aware advertising LED, which doesn't need the
+    console. The DK (J-Link VCOM) has none of this. Don't chase a "missing log" on the XIAO
+    as a firmware bug before ruling this out.
 - Hooks/forwarding operate on transport **chunks**, not framed application messages
   (UART = whatever DMA delivered per idle-timeout/buffer; BLE = one GATT write). Add
   reassembly if framed messages are needed.
@@ -192,7 +206,7 @@ The bidirectional bridge is feature-complete and **compile-verified for both boa
 NUS bridging both directions; per-board overlays + `.conf` fragments (DK debug / XIAO
 production); role-based status LEDs; per-device identity (stable static-random address +
 `nrfProxy-XXXX` name + manufacturer-data tag from the chip's hardware ID, see Conventions);
-power tuning (two-phase fast→slow advertising + low-duty advertising LED blink, XIAO DC/DC
+power tuning (two-phase fast→slow advertising + phase-aware advertising LED blink, XIAO DC/DC
 regulator, and a logging/USB-free `prod.conf` production build); and the two board-specific
 runtime bugs above (uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and documented.
 
