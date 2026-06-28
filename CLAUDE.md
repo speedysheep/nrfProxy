@@ -114,6 +114,18 @@ ref-counting discipline for any new code that touches `current_conn`.
 - **Production target is the XIAO BLE** (`xiao_ble/nrf52840`); the DK is just for
   bench/debug. No flash readback / `APPROTECT` or other security hardening is wanted — the
   firmware is being open-sourced. Don't add protection-oriented config unasked.
+- **Per-device identity** (`identity_init()` in `main.c`): without this, Zephyr brings up
+  the controller with a random-static address **regenerated from the RNG each boot**, and
+  every unit advertises the same `CONFIG_BT_DEVICE_NAME` — so units are indistinguishable
+  and the address is useless as an ID. `identity_init()` reads the SoC's unique hardware ID
+  (`hwinfo_get_device_id()`, needs `CONFIG_HWINFO=y`) and derives **(a)** a fixed
+  static-random BT address from the low 6 ID bytes (`BT_ADDR_SET_STATIC` + `bt_id_create()`,
+  **must run before `bt_enable()`**) and **(b)** a `nrfProxy-XXXX` name suffix from the top
+  ID bytes. The address is stable across reboots *without* `CONFIG_BT_SETTINGS`/flash —
+  it's recomputed deterministically each boot. The name is applied after `bt_enable()` via
+  `bt_set_name()` (needs `CONFIG_BT_DEVICE_NAME_DYNAMIC=y`, `CONFIG_BT_DEVICE_NAME_MAX`) and
+  pushed into `ad[1].data_len`; `ad[]` is therefore non-const. Falls back to the
+  compile-time name/random address if the hardware ID can't be read.
 - **Status LEDs** are chosen by role, not by fixed alias: `main.c` reads the
   `led-connected` / `led-advertising` / `led-error` aliases, which **each board overlay
   must define** (XIAO: green/blue/red = led1/led2/led0; DK: led1/led2/led3). They use
@@ -136,8 +148,10 @@ ref-counting discipline for any new code that touches `current_conn`.
 The bidirectional bridge is feature-complete and **compile-verified for both boards**
 (hardware flashing/testing is done by the user, not in-session). Done so far: UART1⇄BLE
 NUS bridging both directions; per-board overlays + `.conf` fragments (DK debug / XIAO
-production); role-based status LEDs; and the two board-specific runtime bugs above
-(uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and documented.
+production); role-based status LEDs; per-device identity (stable static-random address +
+`nrfProxy-XXXX` name from the chip's hardware ID, see Conventions); and the two
+board-specific runtime bugs above (uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and
+documented.
 
 Open threads / likely next work:
 - **Interception hooks are pass-through stubs.** `on_uart_rx` / `on_ble_rx` just copy

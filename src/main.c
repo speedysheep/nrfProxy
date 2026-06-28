@@ -11,6 +11,7 @@
  * NUS TX characteristic, and the serial bytes stream in.
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -18,6 +19,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/logging/log.h>
 
@@ -139,19 +141,83 @@ static void set_status_leds(enum status_state state)
 #define DEVICE_NAME       CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN   (sizeof(DEVICE_NAME) - 1)
 
+/* Runtime advertised name: CONFIG_BT_DEVICE_NAME plus a "-XXXX" suffix derived
+ * from the chip's hardware ID (filled in by identity_init()). */
+static char device_name[DEVICE_NAME_LEN + sizeof("-XXXX")];
+
+/* Manufacturer-specific advertising data, so a scanner can filter for *our*
+ * boards without connecting. Layout on the wire:
+ *   [company_id lo][company_id hi][magic 'N'][magic 'P'][per-device id x4]
+ * The company id is little-endian; 0xFFFF is the SIG "for testing" id (replace
+ * with an assigned one before shipping). 'N','P' is a fixed tag an Android
+ * ScanFilter matches on; the last 4 bytes are set per-device in identity_init().
+ */
+#define COMPANY_ID_LO 0xFF
+#define COMPANY_ID_HI 0xFF
+
+static uint8_t mfg_data[] = {
+	COMPANY_ID_LO, COMPANY_ID_HI,  /* company id, little-endian */
+	'N', 'P',                      /* magic tag — what a scanner filters on */
+	0, 0, 0, 0,                    /* per-device id, set in identity_init() */
+};
+
 static struct bt_conn *current_conn;
 /* Guards current_conn so the writer thread can take a reference before use,
  * preventing a use-after-free if the peer disconnects mid-send. */
 K_MUTEX_DEFINE(conn_mutex);
 
-static const struct bt_data ad[] = {
+/* Not const: ad[1].data_len is set once at runtime from the resolved name. */
+static struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
-	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+	BT_DATA(BT_DATA_NAME_COMPLETE, device_name, 0),
+	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)),
 };
 
 static const struct bt_data sd[] = {
 	BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_VAL),
 };
+
+/* Give each unit a stable, distinguishable identity derived from the SoC's
+ * unique hardware ID:
+ *   - a fixed random-static BT address (constant across reboots, unlike the
+ *     default which is regenerated from the RNG each boot), and
+ *   - a "-XXXX" name suffix so units are tellable apart in a scanner.
+ * bt_id_create() must run before bt_enable(); the name is applied after.
+ * If the hardware ID can't be read we fall back to the compile-time defaults. */
+static void identity_init(void)
+{
+	uint8_t hwid[8];
+	ssize_t len;
+
+	/* Default name regardless of what follows; suffix appended on success. */
+	memcpy(device_name, DEVICE_NAME, DEVICE_NAME_LEN + 1);
+
+	len = hwinfo_get_device_id(hwid, sizeof(hwid));
+	if (len < 6) {
+		LOG_WRN("No hardware ID (%d); using default name/address",
+			(int)len);
+		return;
+	}
+
+	/* Fixed static-random address from the low 6 bytes of the chip id.
+	 * BT_ADDR_SET_STATIC forces the two MSBs that mark it static-random. */
+	bt_addr_le_t addr = { .type = BT_ADDR_LE_RANDOM };
+
+	memcpy(addr.a.val, hwid, 6);
+	BT_ADDR_SET_STATIC(&addr.a);
+
+	int err = bt_id_create(&addr, NULL);
+	if (err < 0) {
+		LOG_WRN("bt_id_create failed (%d); using random address", err);
+	}
+
+	/* Unique name suffix from the top id bytes (e.g. "nrfProxy-3F7A"). */
+	snprintf(device_name + DEVICE_NAME_LEN, sizeof("-XXXX"), "-%02X%02X",
+		 hwid[5], hwid[4]);
+
+	/* Per-device id in the manufacturer advertising data (after the tag). */
+	memcpy(&mfg_data[4], hwid, 4);
+}
 
 static void advertising_start(void)
 {
@@ -162,7 +228,7 @@ static void advertising_start(void)
 		set_status_leds(STATUS_ERROR);
 		return;
 	}
-	LOG_INF("Advertising as \"%s\"", DEVICE_NAME);
+	LOG_INF("Advertising as \"%s\"", device_name);
 	set_status_leds(STATUS_ADVERTISING);
 }
 
@@ -440,6 +506,9 @@ int main(void)
 		return 0;
 	}
 
+	/* Resolve the per-device address (must precede bt_enable) and name. */
+	identity_init();
+
 	err = bt_enable(NULL);
 	if (err) {
 		LOG_ERR("bt_enable failed (%d)", err);
@@ -447,6 +516,14 @@ int main(void)
 		return 0;
 	}
 	LOG_INF("Bluetooth initialized");
+
+	/* Apply the resolved name to the GAP Device Name characteristic and the
+	 * advertising payload (both must happen after bt_enable). */
+	err = bt_set_name(device_name);
+	if (err) {
+		LOG_WRN("bt_set_name failed (%d)", err);
+	}
+	ad[1].data_len = strlen(device_name);
 
 	err = bt_nus_init(&nus_cb);
 	if (err) {
