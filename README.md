@@ -5,6 +5,8 @@ Bluetooth LE, acting as a **bidirectional proxy**:
 
 Note this project is almost entirely written by Claude. Progress is wonderful! 
 
+"Production" builds are just the regular build, but with optimizations enabled and debug console disabled. This is to limit power drain.
+
 - **Serial → phone:** bytes received on UART1 are forwarded as BLE notifications via the
   Nordic UART Service (NUS).
 - **Phone → serial:** bytes written to the NUS RX characteristic are sent out UART1.
@@ -20,12 +22,12 @@ Each board has its own devicetree overlay and (optionally) a Kconfig fragment un
 The filename must match the full normalized board target (with `/` → `_`, including any
 variant suffix).
 
-| Board | Build target | Overlay + conf | Role | UART1 (TX / RX) | Flashing |
-|-------|--------------|----------------|------|-----------------|----------|
-| nRF52840 DK | `nrf52840dk/nrf52840` | `nrf52840dk_nrf52840.{overlay,conf}` | bench / debug | P1.02 / P1.01 | J-Link (`west flash`) |
-| Seeed XIAO BLE | `xiao_ble/nrf52840` | `xiao_ble_nrf52840.{overlay,conf}` | **production** | D0/P0.02 / D1/P0.03 | UF2 drag-and-drop |
-| Pro Micro nRF52840 / nice!nano | `promicro_nrf52840/nrf52840/uf2` | `promicro_nrf52840_nrf52840_uf2.{overlay,conf}` | clone w/ UF2 bootloader | P0.06 / P0.08 | UF2 drag-and-drop |
-| Nordic nRF52840 Dongle (PCA10059) | `nrf52840dongle/nrf52840` | `nrf52840dongle_nrf52840.{overlay,conf}` | bench / debug | P0.15 / P0.13 | USB DFU |
+| Board | Build target | Overlay + conf | UART1 (TX / RX) | Flashing |
+|-------|--------------|----------------|-----------------|----------|
+| nRF52840 DK | `nrf52840dk/nrf52840` | `nrf52840dk_nrf52840.{overlay,conf}` | P1.02 / P1.01 | J-Link (`west flash`) |
+| Seeed XIAO BLE | `xiao_ble/nrf52840` | `xiao_ble_nrf52840.{overlay,conf}` | D0/P0.02 / D1/P0.03 | UF2 drag-and-drop |
+| Pro Micro nRF52840 / nice!nano | `promicro_nrf52840/nrf52840/uf2` | `promicro_nrf52840_nrf52840_uf2.{overlay,conf}` | P0.06 / P0.08 | UF2 drag-and-drop |
+| Nordic nRF52840 Dongle (PCA10059) | `nrf52840dongle/nrf52840` | `nrf52840dongle_nrf52840.{overlay,conf}` | P0.15 / P0.13 | USB DFU |
 
 The `.overlay` enables UART1 and assigns its pins; the `.conf` holds board-specific Kconfig
 (debug vs. size optimization, USB buffer tuning, etc.). The shared config lives in
@@ -87,7 +89,7 @@ NRFPROXY_NCS=~/ncs/v3.3.1 ./build.sh
 | `xiao` | XIAO BLE | `build_xiao/` | debug build (USB console + logging) |
 | `xiao_prod` | XIAO BLE | `build_xiao_prod/` | production: no logging / USB console |
 | `promicro` | Pro Micro / nice!nano | `build_promicro/` | debug build |
-| `promicro_prod` | Pro Micro / nice!nano | `build_promicro_prod/` | production |
+| `promicro_prod` | Pro Micro / nice!nano | `build_promicro_prod/` | production: no logging / USB console |
 | `dongle` | nRF52840 Dongle | `build_dongle/` | debug build |
 | `all` *(default)* | — | all of the above | builds everything |
 
@@ -96,8 +98,7 @@ committed source of truth for each configuration. Each rebuild is pristine.
 
 ### Flashing
 
-The flashable image is under `<build dir>/nrfProxy/zephyr/` (sysbuild is enabled, only the
-Partition Manager is disabled, so there is no `merged.hex`):
+The flashable image is under `<build dir>/nrfProxy/zephyr/`
 
 - **DK:** `west flash -d build_devkit`, or drag `build_devkit/nrfProxy/zephyr/zephyr.hex`
   onto the J-Link drive.
@@ -117,7 +118,7 @@ Logging goes to each board's default console, which is board-dependent:
 
 - **nRF52840 DK:** the J-Link VCOM serial port (UART0).
 - **XIAO BLE, Pro Micro, and Dongle:** a **USB CDC-ACM** serial port (no debug UART). On
-  these boards the production build (`*_prod`) drops the console and logging entirely.
+  the XIAO and Pro Micro boards the production build (`*_prod`) drops the console and logging entirely.
 
 ## Per-board Kconfig fragments
 
@@ -127,10 +128,9 @@ Zephyr auto-merges on top of `prj.conf`:
 | Fragment | Build |
 |----------|-------|
 | `boards/nrf52840dk_nrf52840.overlay` + `boards/nrf52840dk_nrf52840.conf` | debug (`-Og`, thread info) |
-| `boards/xiao_ble_nrf52840.overlay` + `boards/xiao_ble_nrf52840.conf` | production (size-optimized) |
-| `boards/promicro_nrf52840_nrf52840_uf2.overlay` + `boards/promicro_nrf52840_nrf52840_uf2.conf` | debug (UF2, DC/DC) |
+| `boards/xiao_ble_nrf52840.overlay` + `boards/xiao_ble_nrf52840.conf` | debug (USB DFU) |
+| `boards/promicro_nrf52840_nrf52840_uf2.overlay` + `boards/promicro_nrf52840_nrf52840_uf2.conf` | debug (UF2, USB DFU) |
 | `boards/nrf52840dongle_nrf52840.overlay` + `boards/nrf52840dongle_nrf52840.conf` | debug (USB DFU) |
 
 For a logging-free **production** build on the XIAO (or Pro Micro), layer
-[`prod.conf`](prod.conf) on top via `EXTRA_CONF_FILE` — the `xiao_prod` / `promicro_prod`
-wrapper targets do this for you.
+[`prod.conf`](prod.conf) on top via `EXTRA_CONF_FILE` — the `xiao_prod` / `promicro_prod` wrapper targets do this for you.
