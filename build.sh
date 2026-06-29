@@ -16,23 +16,50 @@
 # resulting per-board flash offsets.
 #
 # Usage:
-#   ./build.sh                # build every configuration
-#   ./build.sh promicro       # build only the Pro Micro (nice!nano) UF2 config
-#   ./build.sh xiao_prod      # production XIAO (no logging/USB console)
+#   ./build.sh                        # build every configuration
+#   ./build.sh promicro               # build only the Pro Micro (nice!nano) UF2 config
+#   ./build.sh xiao_prod              # production XIAO (no logging/USB console)
+#   ./build.sh dk --ncs ~/ncs/v3.3.1  # override the workspace location for one run
 #
-# Prerequisites: `west` must be on PATH and the NCS environment activated, e.g.
+# Locations are resolved as: (1) command-line flag, (2) environment variable,
+# (3) a fallback default — in that order. Flags / env vars:
+#   --proj      PATH   NRFPROXY_PROJ        this project (default: this script's dir)
+#   --ncs       PATH   NRFPROXY_NCS         NCS workspace (default: ~/ncs/v3.3.1)
+#   --toolchain PATH   NRFPROXY_TOOLCHAIN   NCS toolchain dir; if set, its bin dirs are
+#                                           prepended to PATH (default: unset — rely on an
+#                                           already-activated NCS environment)
+#
+# Prerequisites: `west` must be on PATH (either activate the NCS environment first, e.g.
 #   nrfutil toolchain-manager launch --ncs-version v3.3.1 --shell
 #   # or: source ~/ncs/v3.3.1/zephyr/zephyr-env.sh && source <your venv>/bin/activate
-# Override the project / workspace locations with env vars if they differ:
-#   PROJ=~/projects/nrfProxy  NCS=~/ncs/v3.3.1  ./build.sh
+# or point --toolchain / NRFPROXY_TOOLCHAIN at the toolchain dir so this script adds it).
 
 set -euo pipefail
 
-PROJ="${PROJ:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-NCS="${NCS:-$HOME/ncs/v3.3.1}"
+# Defaults come from env vars (NRFPROXY_*); command-line flags below override them.
+PROJ="${NRFPROXY_PROJ:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+NCS="${NRFPROXY_NCS:-$HOME/ncs/v3.3.1}"
+TOOLCHAIN="${NRFPROXY_TOOLCHAIN:-}"
+
+target="all"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --proj)      PROJ="$2";      shift 2 ;;
+    --ncs)       NCS="$2";       shift 2 ;;
+    --toolchain) TOOLCHAIN="$2"; shift 2 ;;
+    -*)          echo "error: unknown option '$1'" >&2; exit 2 ;;
+    *)           target="$1";    shift ;;
+  esac
+done
+
+# If a toolchain dir was given, prepend its bin dirs so `west` is found without a
+# separately-activated environment. Harmless if west is already on PATH.
+if [[ -n "$TOOLCHAIN" ]]; then
+  export PATH="$TOOLCHAIN/bin:$TOOLCHAIN/opt/bin:$TOOLCHAIN/opt/bin/Scripts:$TOOLCHAIN/opt/zephyr-sdk/arm-zephyr-eabi/bin:$PATH"
+fi
 
 if ! command -v west >/dev/null 2>&1; then
-  echo "error: 'west' not on PATH. Activate the NCS environment first (see header)." >&2
+  echo "error: 'west' not on PATH. Activate the NCS environment or pass --toolchain (see header)." >&2
   exit 1
 fi
 
@@ -75,7 +102,6 @@ build_config() {
   ( cd "$NCS" && west build -b "$board" --pristine -d "$PROJ/$dir" "$PROJ" ${sep[@]+"${sep[@]}"} )
 }
 
-target="${1:-all}"
 if [[ "$target" == "all" ]]; then
   for name in "${order[@]}"; do build_config "$name"; done
 else

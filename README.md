@@ -3,6 +3,8 @@
 A Zephyr / nRF Connect SDK application that bridges a serial UART to a phone over
 Bluetooth LE, acting as a **bidirectional proxy**:
 
+Note this project is almost entirely written by Claude. Progress is wonderful! 
+
 - **Serial → phone:** bytes received on UART1 are forwarded as BLE notifications via the
   Nordic UART Service (NUS).
 - **Phone → serial:** bytes written to the NUS RX characteristic are sent out UART1.
@@ -46,6 +48,35 @@ partitioning, and `EXTRA_CONF_FILE=prod.conf` for production targets):
 # Linux / macOS — activate the NCS environment first, then:
 ./build.sh            # build every configuration
 ./build.sh xiao       # build just the XIAO BLE
+```
+
+#### Toolchain / SDK / project locations
+
+The scripts default to the standard install paths, but you can point them elsewhere. Each
+location is resolved as **(1) a parameter passed to the script → (2) an environment
+variable → (3) a built-in default**, in that order. The project path defaults to the
+directory the script lives in, so a checked-out repo is relocatable without any
+configuration.
+
+| What | Default | PowerShell parameter | Bash flag | Environment variable |
+|------|---------|----------------------|-----------|----------------------|
+| NCS toolchain dir (e.g. `…/toolchains/936afb6332`) | Windows: `C:\ncs\toolchains\936afb6332`; Bash: unset (uses an already-activated env) | `-Toolchain` | `--toolchain` | `NRFPROXY_TOOLCHAIN` |
+| NCS workspace (the `vX.Y.Z` dir) | `C:\ncs\v3.3.1` / `~/ncs/v3.3.1` | `-Ncs` | `--ncs` | `NRFPROXY_NCS` |
+| This project | the script's own directory | `-Proj` | `--proj` | `NRFPROXY_PROJ` |
+
+```powershell
+# Windows: override per run via parameters…
+.\build.ps1 dk -Toolchain D:\ncs\toolchains\936afb6332 -Ncs D:\ncs\v3.3.1
+# …or via environment variables (parameters win over these):
+$env:NRFPROXY_NCS = 'D:\ncs\v3.3.1'; .\build.ps1
+```
+
+```bash
+# Linux / macOS: flags…
+./build.sh dk --ncs ~/ncs/v3.3.1
+# …or env vars. Pass --toolchain / NRFPROXY_TOOLCHAIN to prepend the toolchain's bin dirs
+# to PATH instead of activating the NCS environment beforehand:
+NRFPROXY_NCS=~/ncs/v3.3.1 ./build.sh
 ```
 
 ### Targets

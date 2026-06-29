@@ -51,6 +51,7 @@ The nRF Connect SDK is installed at `C:\ncs\v3.3.1` (Zephyr 4.3.99) with toolcha
 then build **from inside the NCS workspace** so the `nrf` module is in scope:
 
 ```powershell
+$proj = (Resolve-Path .).Path     # run this from your nrfProxy checkout
 $tc = "C:\ncs\toolchains\936afb6332"
 $env:PATH = "$tc;$tc\mingw64\bin;$tc\bin;$tc\opt\bin;$tc\opt\bin\Scripts;$tc\opt\nanopb\generator-bin;$tc\nrfutil\bin;$tc\opt\zephyr-sdk\arm-zephyr-eabi\bin;$tc\opt\zephyr-sdk\riscv64-zephyr-elf\bin;$env:PATH"
 $env:PYTHONPATH = "$tc\opt\bin;$tc\opt\bin\Lib;$tc\opt\bin\Lib\site-packages"
@@ -58,8 +59,13 @@ $env:NRFUTIL_HOME = "$tc\nrfutil\home"
 $env:ZEPHYR_TOOLCHAIN_VARIANT = "zephyr"
 $env:ZEPHYR_SDK_INSTALL_DIR = "$tc\opt\zephyr-sdk"
 Set-Location "C:\ncs\v3.3.1"
-west build -b nrf52840dk/nrf52840 -d "C:\Users\extra\projects\nrfProxy\build_devkit" "C:\Users\extra\projects\nrfProxy" -- -DSB_CONFIG_PARTITION_MANAGER=n
+west build -b nrf52840dk/nrf52840 -d "$proj\build_devkit" "$proj" -- -DSB_CONFIG_PARTITION_MANAGER=n
 ```
+
+In the commands below, `$proj` is the path to this checkout (set as above); `C:\ncs\*` are
+the standard nRF Connect SDK install locations (the `build.ps1`/`build.sh` wrappers let you
+override all three via the `NRFPROXY_PROJ` / `NRFPROXY_NCS` / `NRFPROXY_TOOLCHAIN` env vars
+or their parameters — see the README).
 
 - **DTS partitioning (`-DSB_CONFIG_PARTITION_MANAGER=n`).** Every build disables the
   nRF Connect SDK **Partition Manager** — which is *deprecated* in NCS v3.3.1 — so the flash
@@ -97,7 +103,7 @@ reboot-loops (see the gotcha below):
 
 ```powershell
 west build -b promicro_nrf52840/nrf52840/uf2 --pristine `
-  -d "C:\Users\extra\projects\nrfProxy\build_promicro" "C:\Users\extra\projects\nrfProxy" `
+  -d "$proj\build_promicro" "$proj" `
   -- -DSB_CONFIG_PARTITION_MANAGER=n
 ```
 
@@ -163,7 +169,7 @@ miss the Nordic USB bootloader. Disabling Partition Manager (below) leaves
 
 ```powershell
 west build -b nrf52840dongle/nrf52840 --pristine `
-  -d "C:\Users\extra\projects\nrfProxy\build_dongle" "C:\Users\extra\projects\nrfProxy" `
+  -d "$proj\build_dongle" "$proj" `
   -- -DSB_CONFIG_PARTITION_MANAGER=n
 ```
 
@@ -191,8 +197,8 @@ build dir `build_xiao`). For battery/production, layer `prod.conf` on top with
 `EXTRA_CONF_FILE` into a **separate** build dir so the debug build is untouched:
 
 ```powershell
-west build -b xiao_ble/nrf52840 --pristine -d "C:\Users\extra\projects\nrfProxy\build_xiao_prod" `
-  "C:\Users\extra\projects\nrfProxy" -- -DSB_CONFIG_PARTITION_MANAGER=n -DEXTRA_CONF_FILE=prod.conf
+west build -b xiao_ble/nrf52840 --pristine -d "$proj\build_xiao_prod" `
+  "$proj" -- -DSB_CONFIG_PARTITION_MANAGER=n -DEXTRA_CONF_FILE=prod.conf
 ```
 
 `prod.conf` sets `CONFIG_LOG=n` and `CONFIG_BOARD_SERIAL_BACKEND_CDC_ACM=n` (+ `CONSOLE`/
@@ -209,10 +215,11 @@ per-command (remembered in CMakeCache for a non-pristine rebuild of that dir); a
 `BT_NUS` / `bluetooth/services/nus.h` live in the **`nrf` module of nRF Connect SDK**,
 not upstream Zephyr. If a build errors with *"attempt to assign value 'y' to undefined
 symbol BT_NUS"* (or `nus.h: No such file`), the build is using a **plain Zephyr** tree
-instead of NCS. There is a standalone Zephyr workspace at `C:\Users\extra\zephyr` — never
-build against it. Symptoms: `ZEPHYR_BASE=C:/Users/extra/zephyr` in `build_devkit/CMakeCache.txt`,
-and no `nrf` entry in `build_devkit/zephyr_modules.txt`. Fix the IDE build config's **SDK =
-nRF Connect SDK v3.3.1**, and on the CLI rebuild `--pristine` from `C:\ncs\v3.3.1`.
+instead of NCS. If a separate standalone (plain-upstream) Zephyr workspace also exists on the
+machine, never build against it. Symptoms: a `ZEPHYR_BASE` pointing at that plain-Zephyr tree
+(not under `C:\ncs`) in `build_devkit/CMakeCache.txt`, and no `nrf` entry in
+`build_devkit/zephyr_modules.txt`. Fix the IDE build config's **SDK = nRF Connect SDK
+v3.3.1**, and on the CLI rebuild `--pristine` from the NCS workspace (`C:\ncs\v3.3.1`).
 A non-pristine `-d build_devkit` reuses the cached (wrong) `ZEPHYR_BASE`.
 
 ### Per-instance UART async gating (`-ENOSYS`/-88 from uart_callback_set)

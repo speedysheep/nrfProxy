@@ -16,28 +16,61 @@
   merged.hex. See CLAUDE.md ("DTS partitioning") for the full rationale and the
   resulting per-board flash offsets.
 
+.PARAMETER Toolchain
+  Path to the NCS toolchain dir (the one named like '936afb6332'). Falls back to
+  the NRFPROXY_TOOLCHAIN env var, then a sensible default.
+
+.PARAMETER Ncs
+  Path to the NCS workspace (the 'vX.Y.Z' dir that contains the zephyr/ + nrf/
+  modules). Falls back to the NRFPROXY_NCS env var, then a default.
+
+.PARAMETER Proj
+  Path to this project. Falls back to the NRFPROXY_PROJ env var, then to the
+  directory this script lives in (so it's portable when run from the repo).
+
 .EXAMPLE
   .\build.ps1                 # build every configuration
   .\build.ps1 promicro        # build only the Pro Micro (nice!nano) UF2 config
   .\build.ps1 xiao_prod       # production XIAO (no logging/USB console)
+
+.EXAMPLE
+  # Override toolchain / SDK / project locations explicitly:
+  .\build.ps1 dk -Toolchain D:\ncs\toolchains\936afb6332 -Ncs D:\ncs\v3.3.1
+
+.EXAMPLE
+  # ...or via environment variables (parameters take precedence over these):
+  $env:NRFPROXY_NCS = 'D:\ncs\v3.3.1'; .\build.ps1
 #>
 param(
   [ValidateSet('dk','xiao','xiao_prod','promicro','promicro_prod','dongle','all')]
-  [string]$Target = 'all'
+  [string]$Target = 'all',
+  [string]$Toolchain,
+  [string]$Ncs,
+  [string]$Proj
 )
 
 $ErrorActionPreference = 'Stop'
 
+# Resolve a setting from (1) the passed parameter, (2) an environment variable,
+# (3) a fallback default — in that order.
+function Resolve-Setting([string]$ParamValue, [string]$EnvName, [string]$Default) {
+  if ($ParamValue) { return $ParamValue }
+  $envVal = [Environment]::GetEnvironmentVariable($EnvName)
+  if ($envVal)     { return $envVal }
+  return $Default
+}
+
+# Project defaults to this script's own directory, so the repo is relocatable.
+$proj = Resolve-Setting $Proj      'NRFPROXY_PROJ'      $PSScriptRoot
+$ncs  = Resolve-Setting $Ncs       'NRFPROXY_NCS'       'C:\ncs\v3.3.1'
+$tc   = Resolve-Setting $Toolchain 'NRFPROXY_TOOLCHAIN' 'C:\ncs\toolchains\936afb6332'
+
 # --- toolchain / SDK environment (NCS v3.3.1, toolchain 936afb6332) -----------
-$tc = "C:\ncs\toolchains\936afb6332"
 $env:PATH = "$tc;$tc\mingw64\bin;$tc\bin;$tc\opt\bin;$tc\opt\bin\Scripts;$tc\opt\nanopb\generator-bin;$tc\nrfutil\bin;$tc\opt\zephyr-sdk\arm-zephyr-eabi\bin;$tc\opt\zephyr-sdk\riscv64-zephyr-elf\bin;$env:PATH"
 $env:PYTHONPATH = "$tc\opt\bin;$tc\opt\bin\Lib;$tc\opt\bin\Lib\site-packages"
 $env:NRFUTIL_HOME = "$tc\nrfutil\home"
 $env:ZEPHYR_TOOLCHAIN_VARIANT = "zephyr"
 $env:ZEPHYR_SDK_INSTALL_DIR = "$tc\opt\zephyr-sdk"
-
-$proj = "C:\Users\extra\projects\nrfProxy"
-$ncs  = "C:\ncs\v3.3.1"
 
 # --- build configuration table -----------------------------------------------
 # key => @{ board; dir; cmake (args after --) }
