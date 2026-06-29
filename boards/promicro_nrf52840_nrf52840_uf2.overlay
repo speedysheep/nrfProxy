@@ -1,0 +1,80 @@
+/*
+ * nrfProxy — UART1 for incoming serial data on the "Pro Micro nRF52840" / nice!nano
+ * clone (nRF52840 in Pro Micro form factor, Adafruit UF2 bootloader).
+ *
+ * This board has NO debugger — flash by double-tapping RESET to mount the
+ * bootloader's USB mass-storage drive and copying build_promicro/zephyr/zephyr.uf2
+ * onto it. Build the UF2 variant: -b promicro_nrf52840/nrf52840/uf2 (the app must
+ * land at flash offset 0x26000, which that variant arranges).
+ *
+ * Wiring (share a common GND with your serial source!):
+ *   Device TX  ->  P0.08  (board RX)   serial device -> phone
+ *   Device RX  <-  P0.06  (board TX)   phone -> serial device
+ *
+ * P0.06 / P0.08 are the silkscreen TX/RX pads on the nice!nano edge and are free
+ * on this board (uart0=P0.09/10, i2c0=P1.00/P0.11, i2c1=P1.04/P1.06,
+ * spi2=P1.01/P1.02/P1.07, led/pwm0=P0.15 are all taken). Console/logs are over
+ * USB CDC-ACM (no debug UART). Change current-speed to match your source's baud
+ * rate (defaults to 115200).
+ *
+ * DC/DC regulator (&reg1) is ENABLED below for lower active/radio current. The
+ * genuine nice!nano has the required DCC/DEC4 inductor populated (Board-ID
+ * nRF52840-nicenano). A board that lacks that inductor would brown out — disable
+ * this block if you flash a stripped clone.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/regulator/nrf5x.h>
+
+/*
+ * Enable the nRF52840's main DC/DC regulator (REG1) for lower active/radio
+ * current than the default LDO. Requires the external inductor between DCC and
+ * DEC4, which the nice!nano has populated. VDDH is tied to VDD (normal-voltage
+ * mode), so REG0 is unused and left alone.
+ */
+&reg1 {
+	regulator-initial-mode = <NRF5X_REG_MODE_DCDC>;
+};
+
+/ {
+	/*
+	 * Status-LED roles. This board has a single LED (led0 = P0.15, active-high).
+	 * Connected (solid) and advertising (blink) share it — the states are mutually
+	 * exclusive, so it's unambiguous. led-error is intentionally left UNMAPPED:
+	 * main.c's GPIO_DT_SPEC_GET_OR falls back to a null spec and skips it, so the
+	 * error state lights no LED (by request).
+	 */
+	aliases {
+		led-connected = &led0;
+		led-advertising = &led0;
+		/* led-error deliberately omitted -> no LED on error. */
+	};
+};
+
+&pinctrl {
+	uart1_default: uart1_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 6)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 8)>;
+			bias-pull-up;
+		};
+	};
+
+	uart1_sleep: uart1_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 6)>,
+				<NRF_PSEL(UART_RX, 0, 8)>;
+			low-power-enable;
+		};
+	};
+};
+
+&uart1 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-1 = <&uart1_sleep>;
+	pinctrl-names = "default", "sleep";
+};

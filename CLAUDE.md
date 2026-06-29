@@ -12,9 +12,13 @@ phone over Bluetooth LE, acting as a **bidirectional proxy**:
 - **Phone → serial:** bytes written to the NUS RX characteristic are sent out UART1.
 
 Supported boards (each has its own overlay in `boards/`): **nRF52840 DK**
-(`nrf52840dk/nrf52840`) and **Seeed XIAO BLE** (`xiao_ble/nrf52840`). UART1 is the data
-channel on both; `main.c` is board-agnostic (references `DT_NODELABEL(uart1)`). Connect/
-test with the *nRF Connect for Mobile* or *nRF Toolbox* apps.
+(`nrf52840dk/nrf52840`), **Seeed XIAO BLE** (`xiao_ble/nrf52840`), the
+**"Pro Micro nRF52840" / nice!nano clone** (`promicro_nrf52840/nrf52840/uf2` — a generic
+nRF52840 Pro Micro board with the Adafruit/nice!nano UF2 bootloader), and the
+**Nordic nRF52840 Dongle** (`nrf52840dongle/nrf52840`, PCA10059 — debug/bench, flashed by
+USB DFU). UART1 is the data channel on all; `main.c` is board-agnostic (references
+`DT_NODELABEL(uart1)`). Connect/test with the *nRF Connect for Mobile* or *nRF Toolbox*
+apps.
 
 ## Files
 
@@ -24,7 +28,14 @@ test with the *nRF Connect for Mobile* or *nRF Toolbox* apps.
   and the USB CDC-ACM console. Applied via `EXTRA_CONF_FILE`, *not* auto-merged — see
   "Production build" below.
 - `boards/<board>_<qualifier>.overlay` — per-board: enables UART1 and assigns its pins
-  (`nrf52840dk_nrf52840.overlay`, `xiao_ble_nrf52840.overlay`). Add one per new board.
+  (`nrf52840dk_nrf52840.overlay`, `xiao_ble_nrf52840.overlay`,
+  `promicro_nrf52840_nrf52840_uf2.overlay`, `nrf52840dongle_nrf52840.overlay`). Add one
+  per new board. **The filename must
+  match the *full* normalized board target** (`/`→`_`), including any variant: the
+  promicro is built as `promicro_nrf52840/nrf52840/uf2`, so its overlay/conf carry the
+  `_uf2` suffix — naming them `promicro_nrf52840_nrf52840.*` (no variant) is silently
+  ignored and the overlay won't apply (uart1 stays disabled → `DEVICE_DT_GET` build
+  error). The XIAO/DK have no variant, hence no suffix.
 - `CMakeLists.txt` — standard Zephyr app boilerplate; only `src/main.c` is compiled.
 - `.mcp.json` — Memfault MCP server config (unrelated to firmware).
 
@@ -52,6 +63,63 @@ west build -b nrf52840dk/nrf52840 -d "C:\Users\extra\projects\nrfProxy\build" "C
   keep `-d <build>`.
 - Flash: `west flash -d build`, or drag `build/merged.hex` onto the J-Link drive.
 - First full build takes a few minutes (BLE stack); run it in the background.
+
+### nice!nano / Pro Micro nRF52840 clone (UF2 flashing — no debugger)
+This board has **no debugger** — it ships with the Adafruit/nice!nano UF2 bootloader.
+Build the **`uf2` variant** so the app lands at flash offset `0x26000` (the bootloader
+reserves the SoftDevice s140 v6 slot below it; we don't use a SoftDevice but the offset
+must still match):
+
+```powershell
+west build -b promicro_nrf52840/nrf52840/uf2 --pristine `
+  -d "C:\Users\extra\projects\nrfProxy\build_promicro" "C:\Users\extra\projects\nrfProxy"
+```
+
+- **Flash by drag-and-drop, not `west flash`:** double-tap the board's RESET button to
+  mount the bootloader's USB mass-storage drive, then copy the UF2 onto it. Because this
+  is a sysbuild, the artifact is at **`build_promicro/nrfProxy/zephyr/zephyr.uf2`** (note
+  the `nrfProxy/` image subdir — *not* `build_promicro/zephyr/`).
+- Console/logs are over **USB CDC-ACM** (same as the XIAO — same log-visibility quirk,
+  same `CONFIG_UDC_BUF_POOL_SIZE` bump in the board `.conf`). For battery use, layer
+  `prod.conf` via `EXTRA_CONF_FILE` exactly like the XIAO.
+- **One LED only** (`led0` = P0.15, active-high): the overlay maps both `led-connected`
+  and `led-advertising` to it (mutually-exclusive states, so unambiguous) and
+  **deliberately leaves `led-error` unmapped**, so the error state lights no LED (by
+  request) — `main.c`'s `GPIO_DT_SPEC_GET_OR` null-fallback handles the missing alias.
+- **DC/DC regulator is ENABLED** (`&reg1` DC/DC block in the overlay): the genuine
+  nice!nano (confirmed `Board-ID: nRF52840-nicenano`) has the DCC/DEC4 inductor, so
+  DC/DC is safe and cuts active/radio current. **Disable that block if you flash a
+  stripped clone** that lacks the inductor — it would brown out otherwise.
+
+### nRF52840 Dongle (PCA10059, debug/bench — USB DFU, no debugger)
+The dongle has **no on-board debugger**; it ships with the **Nordic Open USB bootloader**.
+The board's Kconfig links the app at flash offset **`0x1000`** (after the factory MBR) via
+`CONFIG_FLASH_LOAD_OFFSET=0x1000` (`BOARD_HAS_NRF5_BOOTLOADER=y`, no MCUboot) — verify it's
+`0x1000` in `build_dongle/nrfProxy/zephyr/.config` after building. This is a **debug build**
+(logging + USB CDC-ACM console + `-Og`/thread-info via the board `.conf`):
+
+```powershell
+west build -b nrf52840dongle/nrf52840 --pristine `
+  -d "C:\Users\extra\projects\nrfProxy\build_dongle" "C:\Users\extra\projects\nrfProxy"
+```
+
+- **Flash by DFU, not `west flash`/J-Link.** Put the dongle in bootloader mode (press the
+  small side RESET button — the red LED pulses), then either:
+  - **nRF Connect for Desktop → Programmer** (easiest): select the dongle, add
+    **`build_dongle/nrfProxy/zephyr/zephyr.hex`** (the app at 0x1000 — note the `nrfProxy/`
+    sysbuild subdir), Write; or
+  - **CLI:** package the hex into a DFU zip and flash it over the bootloader's USB serial
+    (`nrfutil pkg generate ... --application zephyr.hex dfu.zip` then
+    `nrfutil dfu usb-serial -pkg dfu.zip -p COMx`).
+- Console/logs are over **USB CDC-ACM** (same log-visibility quirk + `CONFIG_UDC_BUF_POOL_SIZE`
+  bump as the XIAO/Pro Micro). After the app boots it re-enumerates as a second CDC-ACM port.
+- **LEDs:** the overlay drives the dongle's **RGB LED** (LD2) — green=connected (solid),
+  blue=advertising (blink), red=error (solid). It **disables `pwm0` + the `pwmleds` node**
+  (the board routes those RGB pins through PWM) so they can be plain GPIOs.
+- **DC/DC** is already enabled by the board's own dts (the dongle has the inductor) — nothing
+  to add in the overlay.
+- **UART1** is on **P0.15 (TX) / P0.13 (RX)** — free, broken-out castellated pads. Cross the
+  wires: device TX → board RX (P0.13), device RX ← board TX (P0.15); common ground, 115200.
 
 ### Production build (XIAO, no console/logging)
 The default XIAO build keeps the USB CDC-ACM console + logging (handy for debugging — use
@@ -153,9 +221,12 @@ ref-counting discipline for any new code that touches `current_conn`.
   compile-time name/random address if the hardware ID can't be read.
 - **Status LEDs** are chosen by role, not by fixed alias: `main.c` reads the
   `led-connected` / `led-advertising` / `led-error` aliases, which **each board overlay
-  must define** (XIAO: green/blue/red = led1/led2/led0; DK: led1/led2/led3). They use
-  `GPIO_DT_SPEC_GET_OR`, so a board that omits a role silently gets a dark LED — define all
-  three when adding a board. Connected/error are **solid**; advertising **blinks at a low
+  defines** (XIAO: green/blue/red = led1/led2/led0; DK: led1/led2/led3; Dongle RGB:
+  green/blue/red; Pro Micro: single LED shared by connected+advertising). They use
+  `GPIO_DT_SPEC_GET_OR`, so a board that omits a role silently gets a **dark LED** — usually
+  define all three, but omitting one is a valid way to disable it (the Pro Micro deliberately
+  leaves `led-error` unmapped so errors light nothing on its single LED). Connected/error are
+  **solid**; advertising **blinks at a low
   duty cycle** (`adv_blink_handler`, ~30 ms on) — a solid LED would dominate the battery
   budget next to sub-100uA advertising. The off-gap is **phase-aware**: brisk
   (`ADV_BLINK_OFF_FAST`, ~300 ms) during the fast-advertising phase and lazy
@@ -199,12 +270,13 @@ ref-counting discipline for any new code that touches `current_conn`.
   (UART = whatever DMA delivered per idle-timeout/buffer; BLE = one GATT write). Add
   reassembly if framed messages are needed.
 
-## Status / next steps (as of 2026-06-28)
+## Status / next steps (as of 2026-06-29)
 
-The bidirectional bridge is feature-complete and **compile-verified for both boards**
-(hardware flashing/testing is done by the user, not in-session). Done so far: UART1⇄BLE
-NUS bridging both directions; per-board overlays + `.conf` fragments (DK debug / XIAO
-production); role-based status LEDs; per-device identity (stable static-random address +
+The bidirectional bridge is feature-complete and **compile-verified for all four boards**
+(DK, XIAO BLE, Pro Micro nRF52840 / nice!nano, nRF52840 Dongle — hardware flashing/testing
+is done by the user, not in-session). Done so far: UART1⇄BLE NUS bridging both directions;
+per-board overlays + `.conf` fragments (DK debug / XIAO production / Pro Micro UF2+DC-DC /
+Dongle USB-DFU debug); role-based status LEDs; per-device identity (stable static-random address +
 `nrfProxy-XXXX` name + manufacturer-data tag from the chip's hardware ID, see Conventions);
 power tuning (two-phase fast→slow advertising + phase-aware advertising LED blink, XIAO DC/DC
 regulator, and a logging/USB-free `prod.conf` production build); and the two board-specific
