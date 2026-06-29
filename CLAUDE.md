@@ -37,9 +37,12 @@ apps.
   ignored and the overlay won't apply (uart1 stays disabled → `DEVICE_DT_GET` build
   error). The XIAO/DK have no variant, hence no suffix.
 - `CMakeLists.txt` — standard Zephyr app boilerplate; only `src/main.c` is compiled.
+- `README.md` — user-facing overview: supported-board table, how to run the `build.ps1`/
+  `build.sh` wrappers, flashing, and the per-board Kconfig-fragment list. This file
+  (`CLAUDE.md`) stays the deep reference (build-env setup, flash offsets, gotchas).
 - `.mcp.json` — Memfault MCP server config (unrelated to firmware).
 
-There is no README, no test suite, and no Cursor/Copilot rules.
+There is no test suite and no Cursor/Copilot rules.
 
 ## Build environment (IMPORTANT — read before building)
 
@@ -55,13 +58,26 @@ $env:NRFUTIL_HOME = "$tc\nrfutil\home"
 $env:ZEPHYR_TOOLCHAIN_VARIANT = "zephyr"
 $env:ZEPHYR_SDK_INSTALL_DIR = "$tc\opt\zephyr-sdk"
 Set-Location "C:\ncs\v3.3.1"
-west build -b nrf52840dk/nrf52840 -d "C:\Users\extra\projects\nrfProxy\build" "C:\Users\extra\projects\nrfProxy"
+west build -b nrf52840dk/nrf52840 -d "C:\Users\extra\projects\nrfProxy\build_devkit" "C:\Users\extra\projects\nrfProxy" -- -DSB_CONFIG_PARTITION_MANAGER=n
 ```
 
+- **DTS partitioning (`-DSB_CONFIG_PARTITION_MANAGER=n`).** Every build disables the
+  nRF Connect SDK **Partition Manager** — which is *deprecated* in NCS v3.3.1 — so the flash
+  layout comes from each board's **devicetree partitions** (the `code_partition` /
+  `FLASH_LOAD_OFFSET`), not a PM-generated `partitions.yml`. sysbuild itself is **kept**
+  (so `west flash` and the `nrfProxy/` image subdir still work); only PM is turned off. The
+  flag is a *sysbuild* Kconfig, so it goes after `--`. The `build.ps1`/`build.sh` wrappers
+  pass it for all targets; pass it yourself for any manual `west build`. Verify it took
+  effect: there is **no `partitions.yml`** in the build dir, and the per-board offset is
+  correct in `build*/nrfProxy/zephyr/.config` (DK `0x0`, XIAO `0x27000`, Pro Micro
+  `0x26000`, Dongle `0x1000`).
 - Add `--pristine` after a config/overlay change or to clear a bad cache.
 - Incremental rebuild (after editing `src/main.c` only): drop `-b` and `--pristine`,
-  keep `-d <build>`.
-- Flash: `west flash -d build`, or drag `build/merged.hex` onto the J-Link drive.
+  keep `-d <build>` (the `SB_CONFIG_*` flag is remembered in the CMake cache; a `--pristine`
+  rebuild must pass it again).
+- Flash: `west flash -d build_devkit`. With PM off there is **no `merged.hex`** (a single image has
+  nothing to merge) — the flashable image is `build_devkit/nrfProxy/zephyr/zephyr.hex`; drag that
+  onto the J-Link drive instead.
 - First full build takes a few minutes (BLE stack); run it in the background.
 - **Convenience wrappers** that recreate every per-board build configuration (board +
   build dir + the per-board flags below) live at repo root: `build.ps1` (Windows; bakes in
@@ -74,35 +90,40 @@ west build -b nrf52840dk/nrf52840 -d "C:\Users\extra\projects\nrfProxy\build" "C
 This board has **no debugger** — it ships with the Adafruit/nice!nano UF2 bootloader.
 Build the **`uf2` variant** so the app lands at flash offset `0x26000` (the bootloader
 reserves the SoftDevice s140 v6 slot below it; we don't use a SoftDevice but the offset
-must still match). **You MUST build this board `--no-sysbuild`** — see the gotcha below;
-without it the app is silently linked at `0x0` and the board reboot-loops:
+must still match). Like every board here it builds with **Partition Manager disabled**
+(`-DSB_CONFIG_PARTITION_MANAGER=n`) so the offset comes from the DT `code_partition` (see
+"DTS partitioning" above) — without that the app is silently linked at `0x0` and the board
+reboot-loops (see the gotcha below):
 
 ```powershell
-west build -b promicro_nrf52840/nrf52840/uf2 --pristine --no-sysbuild `
-  -d "C:\Users\extra\projects\nrfProxy\build_promicro" "C:\Users\extra\projects\nrfProxy"
+west build -b promicro_nrf52840/nrf52840/uf2 --pristine `
+  -d "C:\Users\extra\projects\nrfProxy\build_promicro" "C:\Users\extra\projects\nrfProxy" `
+  -- -DSB_CONFIG_PARTITION_MANAGER=n
 ```
 
-- **THE #1 PRO-MICRO GOTCHA — build `--no-sysbuild` (links app at `0x0` otherwise).**
+- **THE #1 PRO-MICRO GOTCHA — Partition Manager links the app at `0x0` (must be off).**
   `promicro_nrf52840` is a community `others/` board target: it carries the plain-Zephyr
   DT `code_partition` at `0x26000` but **no nRF Connect SDK Partition Manager metadata**.
-  Under NCS the default `west build` enables sysbuild → Partition Manager, and with no PM
-  layout for this board PM defaults the `app` partition to **`address: 0x0`, full flash**
-  (check `build_promicro/partitions.yml`). The image is then *linked to run from 0x0* but
-  the UF2 step still copies it to `0x26000`, so the reset vector points into low flash →
-  instant HardFault on every boot → **reboot loop that looks like a rapid LED flash, app
-  never runs, USB CDC port never enumerates** (verify: 1st UF2 block's reset vector must be
-  inside `0x26000..0xc6000`, *not* `0x000xxxxx`). `--no-sysbuild` bypasses PM entirely and
-  uses the DT `code_partition` (`CONFIG_USE_DT_CODE_PARTITION=y`) → correctly linked at
-  `0x26000`. This is **specific to the Pro Micro**: the XIAO and Dongle are first-class NCS
-  boards that *do* ship PM metadata (XIAO reserves `softdevice_reserved` 0x0–0x27000 + app
-  at 0x27000; Dongle reserves `nrf5_mbr` 0x0–0x1000 + app at 0x1000), so they build
-  correctly *with* sysbuild — **don't add `--no-sysbuild` to those**. The DK has no
-  bootloader (app at 0x0), so PM's 0x0 default happens to be right there too.
+  When PM is enabled (the historical NCS default), with no PM layout for this board PM
+  defaults the `app` partition to **`address: 0x0`, full flash** (it would show up in
+  `build_promicro/partitions.yml`). The image is then *linked to run from 0x0* but the UF2
+  step still copies it to `0x26000`, so the reset vector points into low flash → instant
+  HardFault on every boot → **reboot loop that looks like a rapid LED flash, app never
+  runs, USB CDC port never enumerates** (verify: 1st UF2 block's reset vector must be
+  inside `0x26000..0xc6000`, *not* `0x000xxxxx`). Disabling PM bypasses this entirely and
+  uses the DT `code_partition` (`CONFIG_USE_DT_CODE_PARTITION=y`, already in the board's
+  `uf2` defconfig) → correctly linked at `0x26000` (verified: `partitions.yml` absent,
+  `CONFIG_FLASH_LOAD_OFFSET=0x26000`, UF2 first-block target `0x26000`). **Historical
+  note:** this board used to be the *only* one built `--no-sysbuild` to dodge PM; now PM is
+  disabled SDK-wide via the sysbuild Kconfig (`SB_CONFIG_PARTITION_MANAGER=n` — PM is
+  *deprecated* in NCS v3.3.1), so the special case is gone and all boards share one
+  mechanism while keeping sysbuild's conveniences. The XIAO/Dongle ship PM metadata so they
+  built correctly *with* PM too, but DTS partitioning is now the uniform path; the DK has no
+  bootloader (app at 0x0) so its offset is 0x0 either way.
 - **Flash by drag-and-drop, not `west flash`:** double-tap the board's RESET button to
-  mount the bootloader's USB mass-storage drive, then copy the UF2 onto it. With
-  `--no-sysbuild` there is no image subdir — the artifact is at
-  **`build_promicro/zephyr/zephyr.uf2`** (*not* `build_promicro/nrfProxy/zephyr/`, which is
-  the sysbuild path and would be the broken-at-0x0 image anyway).
+  mount the bootloader's USB mass-storage drive, then copy the UF2 onto it. sysbuild is
+  kept (only PM is off), so the artifact is in the image subdir at
+  **`build_promicro/nrfProxy/zephyr/zephyr.uf2`**.
 - Console/logs are over **USB CDC-ACM** (same as the XIAO — same log-visibility quirk,
   same `CONFIG_UDC_BUF_POOL_SIZE` bump in the board `.conf`). For battery use, layer
   `prod.conf` via `EXTRA_CONF_FILE` exactly like the XIAO.
@@ -131,13 +152,19 @@ west build -b promicro_nrf52840/nrf52840/uf2 --pristine --no-sysbuild `
 ### nRF52840 Dongle (PCA10059, debug/bench — USB DFU, no debugger)
 The dongle has **no on-board debugger**; it ships with the **Nordic Open USB bootloader**.
 The board's Kconfig links the app at flash offset **`0x1000`** (after the factory MBR) via
-`CONFIG_FLASH_LOAD_OFFSET=0x1000` (`BOARD_HAS_NRF5_BOOTLOADER=y`, no MCUboot) — verify it's
-`0x1000` in `build_dongle/nrfProxy/zephyr/.config` after building. This is a **debug build**
-(logging + USB CDC-ACM console + `-Og`/thread-info via the board `.conf`):
+`CONFIG_FLASH_LOAD_OFFSET=0x1000` (`BOARD_HAS_NRF5_BOOTLOADER=y && !USE_DT_CODE_PARTITION`,
+no MCUboot) — verify it's `0x1000` in `build_dongle/nrfProxy/zephyr/.config` after building.
+Note the dongle is the one board where the offset comes from `FLASH_LOAD_OFFSET`, *not* the
+DT `code_partition`: its devicetree chooses the MCUboot `slot0` partition at `0x10000`, so
+**do not enable `CONFIG_USE_DT_CODE_PARTITION`** here or the app would link at `0x10000` and
+miss the Nordic USB bootloader. Disabling Partition Manager (below) leaves
+`USE_DT_CODE_PARTITION` off, so the board Kconfig's `0x1000` wins — correct. This is a
+**debug build** (logging + USB CDC-ACM console + `-Og`/thread-info via the board `.conf`):
 
 ```powershell
 west build -b nrf52840dongle/nrf52840 --pristine `
-  -d "C:\Users\extra\projects\nrfProxy\build_dongle" "C:\Users\extra\projects\nrfProxy"
+  -d "C:\Users\extra\projects\nrfProxy\build_dongle" "C:\Users\extra\projects\nrfProxy" `
+  -- -DSB_CONFIG_PARTITION_MANAGER=n
 ```
 
 - **Flash by DFU, not `west flash`/J-Link.** Put the dongle in bootloader mode (press the
@@ -165,26 +192,28 @@ build dir `build_xiao`). For battery/production, layer `prod.conf` on top with
 
 ```powershell
 west build -b xiao_ble/nrf52840 --pristine -d "C:\Users\extra\projects\nrfProxy\build_xiao_prod" `
-  "C:\Users\extra\projects\nrfProxy" -- -DEXTRA_CONF_FILE=prod.conf
+  "C:\Users\extra\projects\nrfProxy" -- -DSB_CONFIG_PARTITION_MANAGER=n -DEXTRA_CONF_FILE=prod.conf
 ```
 
 `prod.conf` sets `CONFIG_LOG=n` and `CONFIG_BOARD_SERIAL_BACKEND_CDC_ACM=n` (+ `CONSOLE`/
 `UART_CONSOLE` off), which drops the USB device stack and console bring-up so the SoC can
 idle between advertising events. UART1/NUS are unaffected (verify `CONFIG_UART_1_ASYNC=y`,
-`CONFIG_SERIAL=y` still set). Flash the UF2 from `build_xiao_prod`. There are **no logs** on
-this build — reflash the plain `build_xiao` build to debug. `EXTRA_CONF_FILE` is per-command
-(not remembered), so a non-pristine rebuild of that dir keeps it via CMakeCache; a
-`--pristine` rebuild must pass the flag again.
+`CONFIG_SERIAL=y` still set). Flash the UF2 from `build_xiao_prod/nrfProxy/zephyr/zephyr.uf2`
+(the XIAO links at `0x27000` from its DT `code_partition`, since its defconfig sets
+`CONFIG_USE_DT_CODE_PARTITION=y`). There are **no logs** on this build — reflash the plain
+`build_xiao` build to debug. Both `SB_CONFIG_PARTITION_MANAGER` and `EXTRA_CONF_FILE` are
+per-command (remembered in CMakeCache for a non-pristine rebuild of that dir); a
+`--pristine` rebuild must pass them again.
 
 ### The #1 gotcha: wrong SDK ⇒ `CONFIG_BT_NUS` undefined
 `BT_NUS` / `bluetooth/services/nus.h` live in the **`nrf` module of nRF Connect SDK**,
 not upstream Zephyr. If a build errors with *"attempt to assign value 'y' to undefined
 symbol BT_NUS"* (or `nus.h: No such file`), the build is using a **plain Zephyr** tree
 instead of NCS. There is a standalone Zephyr workspace at `C:\Users\extra\zephyr` — never
-build against it. Symptoms: `ZEPHYR_BASE=C:/Users/extra/zephyr` in `build/CMakeCache.txt`,
-and no `nrf` entry in `build/zephyr_modules.txt`. Fix the IDE build config's **SDK =
+build against it. Symptoms: `ZEPHYR_BASE=C:/Users/extra/zephyr` in `build_devkit/CMakeCache.txt`,
+and no `nrf` entry in `build_devkit/zephyr_modules.txt`. Fix the IDE build config's **SDK =
 nRF Connect SDK v3.3.1**, and on the CLI rebuild `--pristine` from `C:\ncs\v3.3.1`.
-A non-pristine `-d build` reuses the cached (wrong) `ZEPHYR_BASE`.
+A non-pristine `-d build_devkit` reuses the cached (wrong) `ZEPHYR_BASE`.
 
 ### Per-instance UART async gating (`-ENOSYS`/-88 from uart_callback_set)
 `uart1` is our async port. The nRF UARTE driver's per-instance `UART_<n>_ASYNC` depends on
@@ -318,6 +347,12 @@ Dongle USB-DFU debug); role-based status LEDs; per-device identity (stable stati
 power tuning (two-phase fast→slow advertising + phase-aware advertising LED blink, XIAO DC/DC
 regulator, and a logging/USB-free `prod.conf` production build); and the two board-specific
 runtime bugs above (uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and documented.
+
+All builds were **migrated off the (deprecated) Partition Manager to DTS partitioning** via
+`-DSB_CONFIG_PARTITION_MANAGER=n` (sysbuild kept). Re-verified after the migration that no
+build emits `partitions.yml` and each links at its correct DT/Kconfig offset (DK `0x0`,
+XIAO `0x27000`, Pro Micro `0x26000`, Dongle `0x1000`); the Pro Micro's old `--no-sysbuild`
+special case was removed since disabling PM fixes the same `0x0` link bug for all boards.
 
 Open threads / likely next work:
 - **Interception hooks are pass-through stubs.** `on_uart_rx` / `on_ble_rx` just copy
