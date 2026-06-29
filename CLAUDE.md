@@ -68,17 +68,35 @@ west build -b nrf52840dk/nrf52840 -d "C:\Users\extra\projects\nrfProxy\build" "C
 This board has **no debugger** — it ships with the Adafruit/nice!nano UF2 bootloader.
 Build the **`uf2` variant** so the app lands at flash offset `0x26000` (the bootloader
 reserves the SoftDevice s140 v6 slot below it; we don't use a SoftDevice but the offset
-must still match):
+must still match). **You MUST build this board `--no-sysbuild`** — see the gotcha below;
+without it the app is silently linked at `0x0` and the board reboot-loops:
 
 ```powershell
-west build -b promicro_nrf52840/nrf52840/uf2 --pristine `
+west build -b promicro_nrf52840/nrf52840/uf2 --pristine --no-sysbuild `
   -d "C:\Users\extra\projects\nrfProxy\build_promicro" "C:\Users\extra\projects\nrfProxy"
 ```
 
+- **THE #1 PRO-MICRO GOTCHA — build `--no-sysbuild` (links app at `0x0` otherwise).**
+  `promicro_nrf52840` is a community `others/` board target: it carries the plain-Zephyr
+  DT `code_partition` at `0x26000` but **no nRF Connect SDK Partition Manager metadata**.
+  Under NCS the default `west build` enables sysbuild → Partition Manager, and with no PM
+  layout for this board PM defaults the `app` partition to **`address: 0x0`, full flash**
+  (check `build_promicro/partitions.yml`). The image is then *linked to run from 0x0* but
+  the UF2 step still copies it to `0x26000`, so the reset vector points into low flash →
+  instant HardFault on every boot → **reboot loop that looks like a rapid LED flash, app
+  never runs, USB CDC port never enumerates** (verify: 1st UF2 block's reset vector must be
+  inside `0x26000..0xc6000`, *not* `0x000xxxxx`). `--no-sysbuild` bypasses PM entirely and
+  uses the DT `code_partition` (`CONFIG_USE_DT_CODE_PARTITION=y`) → correctly linked at
+  `0x26000`. This is **specific to the Pro Micro**: the XIAO and Dongle are first-class NCS
+  boards that *do* ship PM metadata (XIAO reserves `softdevice_reserved` 0x0–0x27000 + app
+  at 0x27000; Dongle reserves `nrf5_mbr` 0x0–0x1000 + app at 0x1000), so they build
+  correctly *with* sysbuild — **don't add `--no-sysbuild` to those**. The DK has no
+  bootloader (app at 0x0), so PM's 0x0 default happens to be right there too.
 - **Flash by drag-and-drop, not `west flash`:** double-tap the board's RESET button to
-  mount the bootloader's USB mass-storage drive, then copy the UF2 onto it. Because this
-  is a sysbuild, the artifact is at **`build_promicro/nrfProxy/zephyr/zephyr.uf2`** (note
-  the `nrfProxy/` image subdir — *not* `build_promicro/zephyr/`).
+  mount the bootloader's USB mass-storage drive, then copy the UF2 onto it. With
+  `--no-sysbuild` there is no image subdir — the artifact is at
+  **`build_promicro/zephyr/zephyr.uf2`** (*not* `build_promicro/nrfProxy/zephyr/`, which is
+  the sysbuild path and would be the broken-at-0x0 image anyway).
 - Console/logs are over **USB CDC-ACM** (same as the XIAO — same log-visibility quirk,
   same `CONFIG_UDC_BUF_POOL_SIZE` bump in the board `.conf`). For battery use, layer
   `prod.conf` via `EXTRA_CONF_FILE` exactly like the XIAO.
@@ -90,6 +108,19 @@ west build -b promicro_nrf52840/nrf52840/uf2 --pristine `
   nice!nano (confirmed `Board-ID: nRF52840-nicenano`) has the DCC/DEC4 inductor, so
   DC/DC is safe and cuts active/radio current. **Disable that block if you flash a
   stripped clone** that lacks the inductor — it would brown out otherwise.
+- **LF clock forced to the internal RC oscillator** (`CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y`
+  + `_500PPM` in the board `.conf`). The `promicro_nrf52840` board target defaults to an
+  external **32.768 kHz crystal** (`K32SRC_XTAL`); the nice!nano v2 (and many Pro Micro /
+  "SuperMini" clones) **has no 32 kHz crystal** and runs LFCLK off the internal RC (this is
+  what ZMK does on the nice!nano too). RC needs no crystal (`RC_CALIBRATION` auto-enables to
+  hold BLE timing within spec) and is safe even on a board that *does* populate the crystal
+  — just slightly less power-efficient/accurate — so it's the right default for
+  nice!nano-class boards. **Historical note:** this RC override was first added while
+  chasing the "rapid LED flash" failure, on a *wrong* hypothesis (missing crystal). That
+  symptom was actually the sysbuild/Partition-Manager `0x0` link bug above — the app never
+  reached `bt_enable()`, so the LF clock was never even the issue. RC is retained because
+  it is genuinely correct for the crystal-less nice!nano, not because it fixed the flash.
+  Delete the two `K32SRC` lines if you confirm your board populates the 32 kHz crystal.
 
 ### nRF52840 Dongle (PCA10059, debug/bench — USB DFU, no debugger)
 The dongle has **no on-board debugger**; it ships with the **Nordic Open USB bootloader**.
