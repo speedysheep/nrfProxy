@@ -63,6 +63,12 @@ west build -b nrf52840dk/nrf52840 -d "C:\Users\extra\projects\nrfProxy\build" "C
   keep `-d <build>`.
 - Flash: `west flash -d build`, or drag `build/merged.hex` onto the J-Link drive.
 - First full build takes a few minutes (BLE stack); run it in the background.
+- **Convenience wrappers** that recreate every per-board build configuration (board +
+  build dir + the per-board flags below) live at repo root: `build.ps1` (Windows; bakes in
+  the toolchain env block above) and `build.sh` (Linux/macOS; assumes `west` is already on
+  PATH via the NCS env). Run with a target — `dk`, `xiao`, `xiao_prod`, `promicro`,
+  `promicro_prod`, `dongle`, or `all` (default), e.g. `.\build.ps1 promicro`. These are the
+  committed source of truth for the build configs since the `build*/` dirs are gitignored.
 
 ### nice!nano / Pro Micro nRF52840 clone (UF2 flashing — no debugger)
 This board has **no debugger** — it ships with the Adafruit/nice!nano UF2 bootloader.
