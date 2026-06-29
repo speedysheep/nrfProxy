@@ -26,6 +26,16 @@
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
 #include <zephyr/dt-bindings/regulator/nrf5x.h>
 
+/*
+ * Enable the nRF52840's main DC/DC regulator (REG1) for lower active/radio
+ * current than the default LDO. Requires the external inductor between DCC and
+ * DEC4, which the nice!nano has populated. VDDH is tied to VDD (normal-voltage
+ * mode), so REG0 is unused and left alone. Disable this block if you flash a
+ * stripped clone that lacks the inductor — it would brown out otherwise.
+ */
+&reg1 {
+	regulator-initial-mode = <NRF5X_REG_MODE_DCDC>;
+};
 
 / {
 	/*
