@@ -265,6 +265,29 @@ so a concurrent disconnect can't free the object mid-send (this was a real crash
 by connect-then-immediately-disconnect from a phone's Bluetooth settings). Keep this
 ref-counting discipline for any new code that touches `current_conn`.
 
+**Advertising restart lives in the `recycled` callback, not `disconnected`.** Inside
+`on_disconnected` the connection object is still allocated (the stack unrefs it after the
+callbacks return), so with `CONFIG_BT_MAX_CONN=1` calling `bt_le_adv_start()` there fails
+with `-ENOMEM` and the device is unreachable until reboot (real field bug: first connect
+worked, every reconnect failed). `bt_conn_cb.recycled` fires once the object is back in
+the pool — `on_recycled()` → `advertising_start()` covers both clean disconnects and
+failed connection attempts (the `err != 0` path in `on_connected` deliberately does *not*
+restart advertising for the same reason). Don't move the restart back into
+`on_disconnected`.
+
+**…and `recycled` also fires on `bt_le_adv_stop()`, hence the `adv_active` flag.** Legacy
+connectable advertising *pre-allocates* a connection object, so stopping the advertiser
+(the fast→slow interval switch in `adv_slow_handler`) frees that object and fires
+`recycled` too — a second field bug: `on_recycled` then re-called `advertising_start()`
+against the already-running slow advertiser → `-EALREADY` (err -120) → spurious error LED
+(and, had the race gone the other way, a fast advertiser preempting the slow switch).
+`adv_active` (guarded by `conn_mutex`, same as `current_conn`) tracks whether an
+advertiser is live; `advertising_start()` no-ops when connected or already advertising,
+and `adv_slow_handler` holds the mutex with `adv_active` still true across its
+stop→start gap so a concurrent `recycled` can't sneak in. `on_connected` clears
+`adv_active` in both branches (the connection attempt consumed the advertiser either
+way).
+
 ## Conventions / gotchas
 
 - **Git is the user's job — but remind, don't run.** The user handles all git

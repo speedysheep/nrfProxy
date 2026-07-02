@@ -282,10 +282,29 @@ static const struct bt_le_adv_param adv_param_slow = BT_LE_ADV_PARAM_INIT(
 
 static struct k_work_delayable adv_slow_work;
 
+/* Whether an advertiser is currently live. Guarded by conn_mutex (like
+ * current_conn). Needed because legacy connectable advertising pre-allocates a
+ * connection object, so bt_le_adv_stop() — e.g. during the fast->slow switch —
+ * frees that object and fires the recycled callback; without this flag
+ * on_recycled would start a second, competing advertiser (-EALREADY). */
+static bool adv_active;
+
 static void advertising_start(void)
 {
-	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad),
-				  sd, ARRAY_SIZE(sd));
+	int err;
+
+	k_mutex_lock(&conn_mutex, K_FOREVER);
+	if (current_conn || adv_active) {
+		/* Connected, or an advertiser is already running (recycled
+		 * fired for the object released by the fast->slow switch). */
+		k_mutex_unlock(&conn_mutex);
+		return;
+	}
+	err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad),
+			      sd, ARRAY_SIZE(sd));
+	adv_active = (err == 0);
+	k_mutex_unlock(&conn_mutex);
+
 	if (err) {
 		LOG_ERR("Advertising failed to start (err %d)", err);
 		set_status_leds(STATUS_ERROR);
@@ -304,19 +323,27 @@ static void adv_slow_handler(struct k_work *work)
 	int err;
 
 	k_mutex_lock(&conn_mutex, K_FOREVER);
-	bool connected = current_conn != NULL;
-	k_mutex_unlock(&conn_mutex);
-	if (connected) {
+	if (current_conn || !adv_active) {
+		k_mutex_unlock(&conn_mutex);
 		return;
 	}
 
 	err = bt_le_adv_stop();
 	if (err) {
 		LOG_WRN("adv stop failed (%d)", err);
+		k_mutex_unlock(&conn_mutex);
 		return;
 	}
+	/* adv_active stays true across the stop->start gap: the stop above
+	 * frees the advertiser's pre-allocated connection object and fires the
+	 * recycled callback, which must not start a competing advertiser. */
 	err = bt_le_adv_start(&adv_param_slow, ad, ARRAY_SIZE(ad),
 			      sd, ARRAY_SIZE(sd));
+	if (err) {
+		adv_active = false;
+	}
+	k_mutex_unlock(&conn_mutex);
+
 	if (err) {
 		LOG_ERR("slow advertising failed to start (err %d)", err);
 		set_status_leds(STATUS_ERROR);
@@ -330,11 +357,18 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
 
+	/* Either way the connection attempt consumed the advertiser. */
+	k_mutex_lock(&conn_mutex, K_FOREVER);
+	adv_active = false;
+	if (!err) {
+		current_conn = bt_conn_ref(conn);
+	}
+	k_mutex_unlock(&conn_mutex);
+
 	if (err) {
 		LOG_ERR("Connection failed (err %u)", err);
-		/* Advertising stopped when the connection attempt began; bring
-		 * it back so a failed/rejected peer can't leave us invisible. */
-		advertising_start();
+		/* The recycled callback restarts advertising once the failed
+		 * connection's object is returned to the pool. */
 		return;
 	}
 
@@ -343,10 +377,6 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 
 	/* Advertising stopped on connect; don't let the fast->slow switch fire. */
 	k_work_cancel_delayable(&adv_slow_work);
-
-	k_mutex_lock(&conn_mutex, K_FOREVER);
-	current_conn = bt_conn_ref(conn);
-	k_mutex_unlock(&conn_mutex);
 
 	set_status_leds(STATUS_CONNECTED);
 }
@@ -365,12 +395,25 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 	/* Drop anything buffered so the next client starts on a clean stream. */
 	ring_buf_reset(&uart_rx_ringbuf);
 
+	/* Do NOT restart advertising here: at this point the connection object
+	 * is still allocated (the stack unrefs it after the callbacks return),
+	 * and with CONFIG_BT_MAX_CONN=1 connectable advertising then fails with
+	 * -ENOMEM — leaving the device unreachable until reboot. The recycled
+	 * callback below fires once the object is back in the pool. */
+}
+
+/* A connection object was returned to the pool — for us that means the (only)
+ * connection fully went away (clean disconnect or failed connect attempt), so
+ * this is the safe point to become connectable again. */
+static void on_recycled(void)
+{
 	advertising_start();
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = on_connected,
 	.disconnected = on_disconnected,
+	.recycled = on_recycled,
 };
 
 /* Start a UART transmission if one isn't already running. Safe to call from
