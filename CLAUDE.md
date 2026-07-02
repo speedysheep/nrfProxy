@@ -338,7 +338,11 @@ way).
   `ADV_FAST_DURATION` (30 s) to cut standby radio current. The switch does
   `bt_le_adv_stop()` + `bt_le_adv_start()` (interval can't be changed in place). On connect,
   `on_connected` **cancels** `adv_slow_work` (advertising already stopped); the handler also
-  re-checks `current_conn` to guard the connect-vs-timer race. The USB CDC-ACM console +
+  re-checks `current_conn` to guard the connect-vs-timer race. **Failed advertising starts
+  self-heal**: every failure path schedules `adv_retry_work` (1 s), which re-runs
+  `advertising_start()` — the error LED shows only until a retry succeeds. Stale retries are
+  no-ops via the `current_conn`/`adv_active` guard. Boot-time init failures (`uart_init`,
+  `bt_enable`, `bt_nus_init`) stay terminal on purpose (hardware/config faults). The USB CDC-ACM console +
   logging are dropped in the production build via `prod.conf` (see "Production build") so the
   SoC can idle between adv events. The XIAO overlay enables the main **DC/DC regulator**
   (`&reg1` mode `NRF5X_REG_MODE_DCDC`) for lower active/radio current — it has the required

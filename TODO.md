@@ -36,7 +36,20 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
   `ring_buf_get_claim`/`ring_buf_get_finish` in `ble_write_thread`), or set a `flush` flag the
   writer thread acts on, or guard the reset with `irq_lock()`. Same treatment for both sites.
 
-### M1. Error states are terminal — no retry/recovery, device stays dead until power cycle
+### M1. ~~Error states are terminal — no retry/recovery, device stays dead until power cycle~~ ✅ RESOLVED for advertising (2026-07-02)
+- **Resolution:** a dedicated `adv_retry_work` (1 s cadence, `ADV_RETRY_DELAY`) is now
+  scheduled by every advertising failure path: `advertising_start()` failure,
+  `adv_slow_handler()` start failure (retry restores fast advertising, the slow switch then
+  follows again), and `adv_slow_handler()` stop failure (still advertising fast, so it
+  re-schedules the switch itself instead). The error LED shows during the retry window and
+  clears on recovery. Stale retries after recovery/connection are no-ops via the
+  `current_conn`/`adv_active` guard in `advertising_start()`, so nothing needs cancelling.
+  All six build configs compile.
+- **Deliberately NOT covered:** `main()` init failures (`uart_init`, `bt_enable`,
+  `bt_nus_init`) remain terminal — those indicate hardware/config faults where a retry loop
+  would just mask the problem. A hardware watchdog (`CONFIG_WATCHDOG`) remains the right
+  future companion for field robustness (unmoved from this list — see below).
+- Original finding follows for reference.
 - Where: `advertising_start()` failure path (`src/main.c:308-312`), `adv_slow_handler()`
   failure path (`src/main.c:347-351`), and `main()` init failures.
 - Any transient `bt_le_adv_start()` failure (e.g. a momentary buffer/conn-object shortage)

@@ -293,6 +293,15 @@ static const struct bt_le_adv_param adv_param_slow = BT_LE_ADV_PARAM_INIT(
 
 static struct k_work_delayable adv_slow_work;
 
+/* Retry timer for failed advertising starts. A failure is typically a
+ * transient resource shortage (e.g. no free connection object at that
+ * instant); without a retry the device would sit in the error state,
+ * unreachable until a power cycle — unacceptable for an unattended bridge.
+ * The error LED still shows during the retry window. One second is fast
+ * enough to feel seamless, slow enough not to hammer a persistent fault. */
+#define ADV_RETRY_DELAY K_SECONDS(1)
+static struct k_work_delayable adv_retry_work;
+
 /* Whether an advertiser is currently live. Guarded by conn_mutex (like
  * current_conn). Needed because legacy connectable advertising pre-allocates a
  * connection object, so bt_le_adv_stop() — e.g. during the fast->slow switch —
@@ -317,14 +326,23 @@ static void advertising_start(void)
 	k_mutex_unlock(&conn_mutex);
 
 	if (err) {
-		LOG_ERR("Advertising failed to start (err %d)", err);
+		LOG_ERR("Advertising failed to start (err %d), retrying", err);
 		set_status_leds(STATUS_ERROR);
+		k_work_reschedule(&adv_retry_work, ADV_RETRY_DELAY);
 		return;
 	}
 	LOG_INF("Advertising as \"%s\" (fast)", device_name);
 	adv_slow_phase = false;   /* brisk LED blink during the fast phase */
 	set_status_leds(STATUS_ADVERTISING);
 	k_work_reschedule(&adv_slow_work, ADV_FAST_DURATION);
+}
+
+/* A stale retry firing after recovery (or after a connection arrived) is a
+ * no-op via the current_conn/adv_active guard in advertising_start(), so the
+ * pending work item never needs cancelling. */
+static void adv_retry_handler(struct k_work *work)
+{
+	advertising_start();
 }
 
 /* Restart advertising at the slow interval. Skipped if a connection arrived in
@@ -343,6 +361,8 @@ static void adv_slow_handler(struct k_work *work)
 	if (err) {
 		LOG_WRN("adv stop failed (%d)", err);
 		k_mutex_unlock(&conn_mutex);
+		/* Still advertising fast (reachable) — just retry the switch. */
+		k_work_reschedule(&adv_slow_work, ADV_RETRY_DELAY);
 		return;
 	}
 	/* adv_active stays true across the stop->start gap: the stop above
@@ -356,8 +376,11 @@ static void adv_slow_handler(struct k_work *work)
 	k_mutex_unlock(&conn_mutex);
 
 	if (err) {
-		LOG_ERR("slow advertising failed to start (err %d)", err);
+		/* Not advertising at all now — recover via the retry path (which
+		 * restarts at the fast interval; the slow switch follows again). */
+		LOG_ERR("slow advertising failed to start (err %d), retrying", err);
 		set_status_leds(STATUS_ERROR);
+		k_work_reschedule(&adv_retry_work, ADV_RETRY_DELAY);
 		return;
 	}
 	LOG_INF("Advertising (slow)");
@@ -689,6 +712,7 @@ int main(void)
 
 	leds_init();
 	k_work_init_delayable(&adv_slow_work, adv_slow_handler);
+	k_work_init_delayable(&adv_retry_work, adv_retry_handler);
 
 	err = uart_init();
 	if (err) {
