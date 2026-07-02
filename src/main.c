@@ -41,7 +41,18 @@ static const struct device *const uart_dev = DEVICE_DT_GET(UART_NODE);
 
 /* Pool of RX buffers handed to the async UART driver, and a ring buffer that
  * the BLE thread drains. The ring buffer is single-producer (UART ISR) /
- * single-consumer (ble_write_thread), which is safe without extra locking. */
+ * single-consumer (ble_write_thread), which is safe without extra locking.
+ *
+ * Sizing: 4 slab buffers because the driver holds up to two at a time
+ * (double-buffering) and the release of a finished buffer can lag its
+ * replacement request — 2 would deadlock the RX path on that lag, 4 gives
+ * margin. The 2048-byte ring is ~180 ms of a sustained 115200 stream: enough
+ * to ride out a BLE buffer shortage without dropping, small enough that stale
+ * data can't build up a noticeable forwarding delay.
+ *
+ * The semaphore is binary (max 1) on purpose: it only means "there may be
+ * data", and the consumer drains the ring completely per wakeup, so counting
+ * every ISR chunk would add nothing. */
 K_MEM_SLAB_DEFINE(uart_rx_slab, UART_BUF_SIZE, 4, 4);
 RING_BUF_DECLARE(uart_rx_ringbuf, 2048);
 K_SEM_DEFINE(rx_data_ready, 0, 1);
@@ -392,8 +403,14 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 	}
 	k_mutex_unlock(&conn_mutex);
 
-	/* Drop anything buffered so the next client starts on a clean stream. */
-	ring_buf_reset(&uart_rx_ringbuf);
+	/* Drop anything buffered so the next client starts on a clean stream.
+	 * Don't touch the ring buffer from here: it is single-producer (UART
+	 * ISR) / single-consumer (ble_write_thread), and a ring_buf_reset()
+	 * from this (BT host) thread would race a concurrent ISR put and could
+	 * corrupt the indices. Instead wake the writer thread — it sees
+	 * current_conn == NULL and discards from the consumer side, which is
+	 * safe against the producer. */
+	k_sem_give(&rx_data_ready);
 
 	/* Do NOT restart advertising here: at this point the connection object
 	 * is still allocated (the stack unrefs it after the callbacks return),
@@ -439,6 +456,11 @@ static void uart_tx_kick(void)
 	irq_unlock(key);
 
 	if (uart_tx(uart_dev, uart_tx_buf, len, SYS_FOREVER_US) != 0) {
+		/* The staged chunk is deliberately dropped rather than re-queued:
+		 * a failing uart_tx() here means the driver is in a state where
+		 * retrying inline would likely fail too, and this stream is
+		 * repetitive/loss-tolerant by design. Clearing the flag lets the
+		 * next NUS write (or TX_DONE) kick the pipeline back to life. */
 		uart_tx_in_progress = false;
 	}
 }
@@ -510,7 +532,12 @@ static void uart_cb(const struct device *dev, struct uart_event *evt,
 	}
 
 	case UART_RX_BUF_REQUEST:
-		/* Provide the next buffer for double-buffered reception. */
+		/* Provide the next buffer for double-buffered reception. If the
+		 * slab is empty we deliberately answer with nothing: the driver
+		 * then runs out of buffers and raises UART_RX_DISABLED, whose
+		 * handler below restarts reception once a buffer is free again.
+		 * That path is the recovery mechanism — don't "fix" the silent
+		 * failure here without covering it there. */
 		if (k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT) == 0) {
 			uart_rx_buf_rsp(dev, buf, UART_BUF_SIZE);
 		}
@@ -570,6 +597,22 @@ static int uart_init(void)
 
 /* --- BLE writer thread: ring buffer -> NUS notifications ------------------ */
 
+/* Discard everything in the RX ring buffer. Must only be called from
+ * ble_write_thread: the ring is single-producer (UART ISR) / single-consumer
+ * (this thread), and claim/finish is a pure consumer operation, safe against a
+ * concurrent ISR put. ring_buf_reset() is NOT — it rewrites both indices and
+ * corrupts the buffer if the ISR produces mid-reset (this was a real latent
+ * bug, hit on every disconnect while serial data streamed). */
+static void uart_rx_ringbuf_drain(void)
+{
+	uint8_t *buf;
+	uint32_t len;
+
+	while ((len = ring_buf_get_claim(&uart_rx_ringbuf, &buf, UINT32_MAX)) > 0) {
+		ring_buf_get_finish(&uart_rx_ringbuf, len);
+	}
+}
+
 static void ble_write_thread(void)
 {
 	uint8_t *chunk;
@@ -593,11 +636,15 @@ static void ble_write_thread(void)
 
 			if (!conn) {
 				/* Nobody listening: discard buffered data. */
-				ring_buf_reset(&uart_rx_ringbuf);
+				uart_rx_ringbuf_drain();
 				break;
 			}
 
-			/* Notification payload is limited to ATT_MTU - 3. */
+			/* Notification payload is limited to ATT_MTU - 3 (opcode +
+			 * handle overhead). The MTU is re-read every chunk because
+			 * the peer can negotiate it up mid-connection. The 20-byte
+			 * fallback is the minimum ATT MTU (23) minus that overhead
+			 * — used only if the stack reports a nonsense MTU. */
 			max_send = bt_gatt_get_mtu(conn);
 			max_send = (max_send > 3) ? (max_send - 3) : 20;
 
@@ -626,6 +673,9 @@ static void ble_write_thread(void)
 	}
 }
 
+/* Preemptible priority 7: below the BT host/controller threads (cooperative,
+ * negative priorities), so pushing proxy data can never starve the stack that
+ * has to deliver it — but above the idle-level housekeeping threads. */
 K_THREAD_DEFINE(ble_write_thread_id, 2048, ble_write_thread, NULL, NULL, NULL,
 		7, 0, 0);
 
@@ -675,5 +725,7 @@ int main(void)
 
 	advertising_start();
 
+	/* main() returning is normal here: the application lives on in the BLE
+	 * callbacks, the UART ISR, and ble_write_thread. */
 	return 0;
 }
