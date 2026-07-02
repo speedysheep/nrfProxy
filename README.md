@@ -120,6 +120,35 @@ Logging goes to each board's default console, which is board-dependent:
 - **XIAO BLE, Pro Micro, and Dongle:** a **USB CDC-ACM** serial port (no debug UART). On
   the XIAO and Pro Micro boards the production build (`*_prod`) drops the console and logging entirely.
 
+## Pairing / security lock
+
+The bridge **locks to the first phone that pairs with it**. On the first connection the
+device requests encryption, so the phone shows the system **Just Works pairing dialog** (no
+PIN); once paired, the bond is stored in flash and:
+
+- Only the bonded phone can reconnect — the device advertises with a link-layer **filter
+  accept list**, so other phones can still *see* it in a scan but their connection attempts
+  are ignored.
+- Serial data flows **only after the link is encrypted**. A link that hasn't encrypted
+  within ~10 s is disconnected.
+- The bond **survives power loss** and re-pairs automatically on reconnect (no new dialog).
+
+**Factory reset (hand the device to a new phone):** hold the board's **bond-reset button
+while powering it on** (through boot, ~3 s — the advertising LED blinks as feedback). This
+wipes the stored bond and returns to open pairing mode. If a phone is factory-reset or
+replaced, this button is the only recovery path.
+
+| Board | Bond-reset button | Wiring |
+|-------|-------------------|--------|
+| nRF52840 DK | **Button 1** (SW1) | on-board — nothing to wire |
+| nRF52840 Dongle | **SW1** (top-face button, *not* the side RESET) | on-board — nothing to wire |
+| XIAO BLE | **D2 / P0.28** | momentary switch (or tweezer short) from the D2 pad to GND |
+| Pro Micro / nice!nano | **P0.17** | momentary switch from the P0.17 pad to GND (sits below the left-edge GND pads) |
+
+All use internal pull-ups (active-low), so no external resistor is needed. A board whose
+overlay omits the `bond-reset` alias simply has no reset button. See [`CLAUDE.md`](CLAUDE.md)
+and [`PAIRING_PLAN.md`](PAIRING_PLAN.md) for the full design.
+
 ## Per-board Kconfig fragments
 
 Debug/optimization settings are board-specific and live in the per-board fragments that

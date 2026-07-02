@@ -31,6 +31,11 @@
 		led-connected = &led1_green;    /* P1.09 green */
 		led-advertising = &led1_blue;   /* P0.12 blue  */
 		led-error = &led1_red;          /* P0.08 red   */
+
+		/* Bond-reset: hold SW1 (the top-face button, P1.06 — NOT the
+		 * side RESET) through boot ~3 s to wipe the stored pairing. The
+		 * board node already carries GPIO_PULL_UP | GPIO_ACTIVE_LOW. */
+		bond-reset = &button0;
 	};
 
 	/*

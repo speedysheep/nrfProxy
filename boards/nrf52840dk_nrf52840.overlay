@@ -18,6 +18,11 @@
 		led-connected = &led1;
 		led-advertising = &led2;
 		led-error = &led3;
+
+		/* Bond-reset: hold Button 1 (SW1, P0.11) through boot ~3 s to
+		 * wipe the stored pairing. The board node already carries
+		 * GPIO_PULL_UP | GPIO_ACTIVE_LOW. */
+		bond-reset = &button0;
 	};
 };
 

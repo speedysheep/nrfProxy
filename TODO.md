@@ -12,54 +12,6 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
 
 ## Issues (ranked by severity)
 
-### H1. ~~`ring_buf_reset()` races the UART ISR producer — potential ring-buffer corruption~~ ✅ RESOLVED (2026-07-02)
-- **Resolution:** both `ring_buf_reset()` calls on `uart_rx_ringbuf` removed.
-  `on_disconnected` now just wakes the writer thread (`k_sem_give(&rx_data_ready)`), which
-  sees `current_conn == NULL` and discards via the new `uart_rx_ringbuf_drain()` — a
-  claim/finish loop, i.e. a pure consumer-side operation that is safe against the ISR
-  producer. `uart_tx_ringbuf` was checked and has no reset call (its consumer side is
-  serialized under `irq_lock` in `uart_tx_kick`), so it needed no change. All six build
-  configs compile; runtime disconnect-while-streaming test still to be done on hardware.
-- Original finding follows for reference.
-- Where: `src/main.c:396` (`on_disconnected`) and `src/main.c:596` (`ble_write_thread`, the
-  "nobody listening" discard).
-- Zephyr ring buffers are only concurrency-safe as single-producer/single-consumer where the
-  producer touches the head and the consumer the tail. `ring_buf_reset()` rewrites **both**
-  indices, so it is neither role. The producer here is the UART ISR (`UART_RX_RDY` →
-  `ring_buf_put`, `src/main.c:506`), which keeps firing after a disconnect (the serial side
-  doesn't know the phone left). A reset from the BT host thread or writer thread concurrent
-  with an ISR `put` can corrupt the indices → garbled forwarded data or a permanently
-  confused buffer.
-- This window is hit on **every disconnect while serial data is streaming**, which for the
-  e-bike use case is the normal case.
-- Fix direction (later): flush from the consumer side only (loop
-  `ring_buf_get_claim`/`ring_buf_get_finish` in `ble_write_thread`), or set a `flush` flag the
-  writer thread acts on, or guard the reset with `irq_lock()`. Same treatment for both sites.
-
-### M1. ~~Error states are terminal — no retry/recovery, device stays dead until power cycle~~ ✅ RESOLVED for advertising (2026-07-02)
-- **Resolution:** a dedicated `adv_retry_work` (1 s cadence, `ADV_RETRY_DELAY`) is now
-  scheduled by every advertising failure path: `advertising_start()` failure,
-  `adv_slow_handler()` start failure (retry restores fast advertising, the slow switch then
-  follows again), and `adv_slow_handler()` stop failure (still advertising fast, so it
-  re-schedules the switch itself instead). The error LED shows during the retry window and
-  clears on recovery. Stale retries after recovery/connection are no-ops via the
-  `current_conn`/`adv_active` guard in `advertising_start()`, so nothing needs cancelling.
-  All six build configs compile.
-- **Deliberately NOT covered:** `main()` init failures (`uart_init`, `bt_enable`,
-  `bt_nus_init`) remain terminal — those indicate hardware/config faults where a retry loop
-  would just mask the problem. A hardware watchdog (`CONFIG_WATCHDOG`) remains the right
-  future companion for field robustness (unmoved from this list — see below).
-- Original finding follows for reference.
-- Where: `advertising_start()` failure path (`src/main.c:308-312`), `adv_slow_handler()`
-  failure path (`src/main.c:347-351`), and `main()` init failures.
-- Any transient `bt_le_adv_start()` failure (e.g. a momentary buffer/conn-object shortage)
-  lights the error LED and stops — nothing ever retries, so a recoverable hiccup bricks the
-  bridge until reboot. For an unattended device this should self-heal.
-- Fix direction: on adv-start failure, reschedule a retry (e.g. via `adv_slow_work` or a
-  dedicated retry work item with backoff) instead of dead-ending. Consider the same for
-  `uart_init()` failure. A hardware watchdog (`CONFIG_WATCHDOG`) is the belt-and-braces
-  companion for a headless bridge.
-
 ### M2. UART RX can stop permanently if buffer recovery fails
 - Where: `UART_RX_DISABLED` handler, `src/main.c:525-534`.
 - If `k_mem_slab_alloc()` (K_NO_WAIT, in ISR) or `uart_rx_enable()` fails at that moment,
@@ -69,24 +21,23 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
 - Fix direction: on failure, schedule a delayed work item that retries `uart_rx_enable()`
   until it succeeds, and log once.
 
-### M3. Unauthenticated, unencrypted NUS — anyone in radio range can drive the serial port
-- The NUS RX characteristic accepts writes from any connected central; there is no pairing,
-  bonding, or encryption requirement. Whoever connects first owns the bridge — and the
-  serial peer here is an e-bike motor controller (assist level, walk mode, etc. flow over
-  this link via the phone app).
-- Known/accepted for now (project explicitly excludes security hardening while
-  open-sourcing), but record the decision and threat model deliberately rather than by
-  omission. If it's ever revisited: `CONFIG_BT_SMP` + security level on the NUS
-  characteristics, or an application-level allowlist using the peer address.
+### M3. Unauthenticated, unencrypted NUS — ✅ ADDRESSED (pairing lock implemented)
+- Was: the NUS RX characteristic accepted writes from any connected central; no pairing,
+  bonding, or encryption. Whoever connected first owned the bridge — and the serial peer
+  is an e-bike motor controller (assist level, walk mode, etc.).
+- **Implemented per `PAIRING_PLAN.md`:** bond-to-first-phone (SMP Just Works +
+  `CONFIG_BT_SETTINGS`), filter-accept-list advertising in locked mode, an app-layer
+  encryption gate (`link_secure`) + 10 s security watchdog, and a per-board `bond-reset`
+  button (hold at boot 3 s → `bt_unpair`). Compile-verified on all six configs; **not yet
+  hardware-tested** — see `PAIRING_PLAN.md §6`. The bafflingvision app still needs the
+  matching bonding/UI work in `PAIRING_PLAN.md §7`.
 
-### M4. CLAUDE.md is stale on the Pro Micro LF-clock config (says the opposite of the code)
-- CLAUDE.md ("LF clock forced to the internal RC oscillator…") still documents
+### M4. CLAUDE.md stale on the Pro Micro LF-clock config — ✅ FIXED
+- Was: CLAUDE.md ("LF clock forced to the internal RC oscillator…") documented
   `CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y` living in `boards/promicro_nrf52840_nrf52840_uf2.conf`,
-  but commit `f678d25` restored the crystal default; the `.conf` now deliberately has **no
-  override** and documents the inverse recommendation (add RC only for crystal-less clones).
-- CLAUDE.md is this repo's deep reference — a future session following it would "restore" a
-  setting that was intentionally removed. Update the paragraph (and the Status section if it
-  mentions RC).
+  but commit `f678d25` restored the crystal default; the `.conf` deliberately has no override.
+- Fixed: the CLAUDE.md Pro Micro paragraph now says the LF clock is left at the board default
+  (external crystal) with RC as the crystal-less-clone opt-in, matching the `.conf`.
 
 ### L1. Silent data loss points — no counters, no logs
 - `uart_rx_ringbuf` overflow: partial `ring_buf_put()` in the ISR (`src/main.c:506`) ignores

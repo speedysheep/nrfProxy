@@ -141,19 +141,18 @@ west build -b promicro_nrf52840/nrf52840/uf2 --pristine `
   nice!nano (confirmed `Board-ID: nRF52840-nicenano`) has the DCC/DEC4 inductor, so
   DC/DC is safe and cuts active/radio current. **Disable that block if you flash a
   stripped clone** that lacks the inductor — it would brown out otherwise.
-- **LF clock forced to the internal RC oscillator** (`CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y`
-  + `_500PPM` in the board `.conf`). The `promicro_nrf52840` board target defaults to an
-  external **32.768 kHz crystal** (`K32SRC_XTAL`); the nice!nano v2 (and many Pro Micro /
-  "SuperMini" clones) **has no 32 kHz crystal** and runs LFCLK off the internal RC (this is
-  what ZMK does on the nice!nano too). RC needs no crystal (`RC_CALIBRATION` auto-enables to
-  hold BLE timing within spec) and is safe even on a board that *does* populate the crystal
-  — just slightly less power-efficient/accurate — so it's the right default for
-  nice!nano-class boards. **Historical note:** this RC override was first added while
+- **LF clock left at the board default (external 32.768 kHz crystal).** The board `.conf`
+  has **no `K32SRC` override** — the `promicro_nrf52840` target defaults to the external
+  crystal (`CONFIG_CLOCK_CONTROL_NRF_K32SRC_XTAL`), which the genuine nice!nano populates
+  (better accuracy / lower power than the internal RC). **If you flash a crystal-less clone**
+  (many cheap Pro Micro / "SuperMini" boards omit the 32 kHz crystal), add
+  `CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y` + `CONFIG_CLOCK_CONTROL_NRF_K32SRC_500PPM=y` to
+  `boards/promicro_nrf52840_nrf52840_uf2.conf`, or LFCLK never starts and the BLE controller
+  blocks at `bt_enable()`. **Historical note:** an RC override was briefly added here while
   chasing the "rapid LED flash" failure, on a *wrong* hypothesis (missing crystal). That
   symptom was actually the sysbuild/Partition-Manager `0x0` link bug above — the app never
-  reached `bt_enable()`, so the LF clock was never even the issue. RC is retained because
-  it is genuinely correct for the crystal-less nice!nano, not because it fixed the flash.
-  Delete the two `K32SRC` lines if you confirm your board populates the 32 kHz crystal.
+  reached `bt_enable()`, so the LF clock was never the issue. The override was reverted
+  (commit `f678d25`); the crystal default is correct for a genuine nice!nano.
 
 ### nRF52840 Dongle (PCA10059, debug/bench — USB DFU, no debugger)
 The dongle has **no on-board debugger**; it ships with the **Nordic Open USB bootloader**.
@@ -288,6 +287,45 @@ stop→start gap so a concurrent `recycled` can't sneak in. `on_connected` clear
 `adv_active` in both branches (the connection attempt consumed the advertiser either
 way).
 
+**Pairing lock (bond-to-first-phone).** Once a phone pairs, only that phone can reconnect;
+the bond is flash-persisted and a hardware button wipes it. Full design in
+`PAIRING_PLAN.md`; the moving parts in `main.c`:
+- **Two modes, decided at boot from the stored bonds** (`refresh_locked_mode()`, called
+  after `settings_load()` and again after each pairing). No bond → **pairing mode**: open
+  advertising. Bond present → **locked mode**: the bonded peer's identity address is put on
+  the **filter accept list** and advertising uses the `*_filtered` params
+  (`BT_LE_ADV_OPT_FILTER_CONN`), so the controller ignores connections from anyone else at
+  the link layer. `advertising_start()`/`adv_slow_handler()` pick open vs. filtered params
+  via `adv_params_fast()`/`adv_params_slow()` off the `locked_mode` flag — the fast *and*
+  slow sets both have a filtered variant (the fast→slow switch rebuilds params). We
+  deliberately **omit `BT_LE_ADV_OPT_FILTER_SCAN_REQ`** so non-owners can still *see* the
+  device in a scan (debuggable; the app picker still lists it) — they just can't connect.
+- **Just Works pairing** (no display → unauthenticated but encrypted). `CONFIG_BT_NUS_AUTHEN`
+  is deliberately **not** set: it demands MITM-authenticated pairing that Just Works can
+  never satisfy, so every GATT op would fail. Encryption is instead enforced in the app
+  layer: `on_connected` calls `bt_conn_set_security(L2)` (sends an SMP Security Request →
+  Android's pairing dialog on a new phone, or LTK encryption on the bonded one);
+  `on_security_changed` sets `link_secure` (guarded by `conn_mutex`) at level ≥ 2. **NUS
+  data is gated on `link_secure`** — `nus_received` drops writes and `ble_write_thread`
+  drains-and-discards until the link encrypts. A **security watchdog** (`security_timeout_work`,
+  10 s, armed on connect, cancelled by `on_security_changed`) disconnects any link that
+  never encrypts, so an attacker can't squat unencrypted on the single connection slot.
+- **`CONFIG_BT_MAX_PAIRED=1`** makes the stack reject a second bond; the accept list makes
+  a second phone unable to even connect in locked mode.
+- **Reset button** (`bond-reset` alias, per-board — `GPIO_DT_SPEC_GET_OR`, so a board
+  without it simply has none). `bond_reset_requested()` runs **before `bt_enable()`**: if
+  the button is down at boot it must stay held `BOND_RESET_HOLD_MS` (3 s, advertising LED
+  blinks as feedback; release early aborts). The actual `bt_unpair(BT_ID_DEFAULT,
+  BT_ADDR_LE_ANY)` runs **after `settings_load()`** (nothing to erase before), then
+  `refresh_locked_mode()` clears the accept list and returns to pairing mode.
+- **Bond persistence** needs `CONFIG_BT_SETTINGS` (+ `SETTINGS`/`NVS`/`FLASH_MAP`), storing
+  the LTK/IRK in the DT `storage_partition` — all four boards already define one, no overlay
+  change. These live in `prj.conf` and **`prod.conf` must not strip them** (production needs
+  the lock most). Note `settings_load()` restores the BT identity too; `identity_init()`
+  still creates the same deterministic address before `bt_enable()`, so it's benign — but
+  this identity↔settings interplay is the top thing to verify on hardware (boot twice, BT
+  address unchanged).
+
 ## Conventions / gotchas
 
 - **Git is the user's job — but remind, don't run.** The user handles all git
@@ -370,7 +408,7 @@ way).
   (UART = whatever DMA delivered per idle-timeout/buffer; BLE = one GATT write). Add
   reassembly if framed messages are needed.
 
-## Status / next steps (as of 2026-06-29)
+## Status / next steps (as of 2026-07-02)
 
 The bidirectional bridge is feature-complete and **compile-verified for all four boards**
 (DK, XIAO BLE, Pro Micro nRF52840 / nice!nano, nRF52840 Dongle — hardware flashing/testing
@@ -381,6 +419,16 @@ Dongle USB-DFU debug); role-based status LEDs; per-device identity (stable stati
 power tuning (two-phase fast→slow advertising + phase-aware advertising LED blink, XIAO DC/DC
 regulator, and a logging/USB-free `prod.conf` production build); and the two board-specific
 runtime bugs above (uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and documented.
+
+**Pairing lock implemented (`PAIRING_PLAN.md`, closes TODO.md M3):** bond-to-first-phone
+via SMP Just Works + `CONFIG_BT_SETTINGS` flash-persisted bond; filter-accept-list
+advertising in locked mode; app-layer encryption gate + 10 s security watchdog; per-board
+`bond-reset` button (hold at boot 3 s → `bt_unpair`). Compile-verified on all six
+configurations (dk/xiao/promicro/dongle + xiao_prod/promicro_prod), offsets unchanged and
+no `partitions.yml`, and `prod.conf` confirmed to keep `BT_SMP`/`BT_SETTINGS`/`NVS`.
+**Not yet hardware-tested** — see `PAIRING_PLAN.md §6` (esp. the identity↔settings address
+stability and RPA-resolution-against-accept-list checks). The bafflingvision app needs the
+matching bonding/UI changes from `PAIRING_PLAN.md §7` before end-to-end use.
 
 All builds were **migrated off the (deprecated) Partition Manager to DTS partitioning** via
 `-DSB_CONFIG_PARTITION_MANAGER=n` (sysbuild kept). Re-verified after the migration that no
