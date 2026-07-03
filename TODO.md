@@ -32,13 +32,6 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
   hardware-tested** — see `PAIRING_PLAN.md §6`. The bafflingvision app still needs the
   matching bonding/UI work in `PAIRING_PLAN.md §7`.
 
-### M4. CLAUDE.md stale on the Pro Micro LF-clock config — ✅ FIXED
-- Was: CLAUDE.md ("LF clock forced to the internal RC oscillator…") documented
-  `CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y` living in `boards/promicro_nrf52840_nrf52840_uf2.conf`,
-  but commit `f678d25` restored the crystal default; the `.conf` deliberately has no override.
-- Fixed: the CLAUDE.md Pro Micro paragraph now says the LF clock is left at the board default
-  (external crystal) with RC as the crystal-less-clone opt-in, matching the `.conf`.
-
 ### L1. Silent data loss points — no counters, no logs
 - `uart_rx_ringbuf` overflow: partial `ring_buf_put()` in the ISR (`src/main.c:506`) ignores
   the return value; bytes vanish without trace. (2048 bytes ≈ 180 ms of 115200 stream — a
@@ -48,12 +41,16 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
 - Fix direction: keep drop **counters** (ISR-safe) and log them periodically from thread
   context; log the `uart_tx()` error code once.
 
-### L2. Transient wrong LED / error log if a central connects exactly at the fast→slow switch
-- `adv_slow_handler()` (`src/main.c:321-354`) can run in the window where the controller has
-  already accepted a connection but `on_connected` hasn't updated state; its
-  `bt_le_adv_start(slow)` then fails (no free conn object) → error LED + log, corrected a
-  moment later by `on_connected`. Harmless but confusing during debugging. Accept and
-  document, or have the failure path re-check `current_conn` before declaring error.
+### L2. Transient wrong LED / error log if a central connects exactly at the fast→slow switch — ✅ FIXED
+- Was: `adv_slow_handler()` can run in the window where the controller has already accepted a
+  connection but `on_connected` hasn't updated state; its `bt_le_adv_start(slow)` then fails
+  (no free conn object) → error LED + log, corrected a moment later by `on_connected`.
+  Harmless but confusing during debugging.
+- **Fixed:** the slow-start failure path re-checks `current_conn`. If a connection arrived it
+  logs at INFO and returns (`on_connected` owns the LED/adv state) — no spurious error LED.
+  Otherwise it retries via `adv_retry_work` **without** lighting `STATUS_ERROR`;
+  `advertising_start()` surfaces `STATUS_ERROR` only if the retry genuinely can't advertise, so
+  a transient race never shows red while a real, persistent failure still does.
 
 ### L3. LED state machine has benign races and a cosmetic blink quirk
 - `set_status_leds()` / `current_status` are touched from main, BT host thread, and the
@@ -63,8 +60,9 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
 - Cosmetic only; fold into any future LED rework.
 
 ### L4. README nits
-- "Per-board Kconfig fragments" table labels the XIAO and Pro Micro rows "(USB DFU)" — both
-  flash by UF2 drag-and-drop (only the Dongle is USB DFU). The main board table has it right.
+- ✅ FIXED: "Per-board Kconfig fragments" table labeled the XIAO and Pro Micro rows "(USB DFU)"
+  — both flash by UF2 drag-and-drop (only the Dongle is USB DFU, via nrfutil/Programmer). The
+  main board table already had it right; the fragment table now says "(UF2 drag-and-drop)".
 - README calls the plain `xiao` target a "debug build" while
   `boards/xiao_ble_nrf52840.conf`'s header comment calls the XIAO "the production board".
   Both are true (debug *build* of the production *board*) but the wording invites confusion.

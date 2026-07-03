@@ -157,8 +157,8 @@ Zephyr auto-merges on top of `prj.conf`:
 | Fragment | Build |
 |----------|-------|
 | `boards/nrf52840dk_nrf52840.overlay` + `boards/nrf52840dk_nrf52840.conf` | debug (`-Og`, thread info) |
-| `boards/xiao_ble_nrf52840.overlay` + `boards/xiao_ble_nrf52840.conf` | debug (USB DFU) |
-| `boards/promicro_nrf52840_nrf52840_uf2.overlay` + `boards/promicro_nrf52840_nrf52840_uf2.conf` | debug (UF2, USB DFU) |
+| `boards/xiao_ble_nrf52840.overlay` + `boards/xiao_ble_nrf52840.conf` | debug (UF2 drag-and-drop) |
+| `boards/promicro_nrf52840_nrf52840_uf2.overlay` + `boards/promicro_nrf52840_nrf52840_uf2.conf` | debug (UF2 drag-and-drop) |
 | `boards/nrf52840dongle_nrf52840.overlay` + `boards/nrf52840dongle_nrf52840.conf` | debug (USB DFU) |
 
 For a logging-free **production** build on the XIAO (or Pro Micro), layer

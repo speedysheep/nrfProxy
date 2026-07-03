@@ -478,10 +478,30 @@ static void adv_slow_handler(struct k_work *work)
 	k_mutex_unlock(&conn_mutex);
 
 	if (err) {
-		/* Not advertising at all now — recover via the retry path (which
-		 * restarts at the fast interval; the slow switch follows again). */
-		LOG_ERR("slow advertising failed to start (err %d), retrying", err);
-		set_status_leds(STATUS_ERROR);
+		/* Distinguish the benign connect-vs-timer race from a genuine
+		 * failure. This handler runs on the system workqueue; a central can
+		 * connect in the gap between the guard check above and bt_le_adv_start,
+		 * consuming the single connection object so the slow start fails with
+		 * -ENOMEM before on_connected (BT RX thread) has updated state. */
+		struct bt_conn *conn;
+
+		k_mutex_lock(&conn_mutex, K_FOREVER);
+		conn = current_conn;
+		k_mutex_unlock(&conn_mutex);
+
+		if (conn) {
+			/* Connected after all: on_connected owns the LED/adv state,
+			 * so this failure is expected — don't flash the error LED. */
+			LOG_INF("slow adv aborted: connected during switch");
+			return;
+		}
+
+		/* No connection visible yet. Either the same race a hair earlier
+		 * (on_connected is about to run and the retry will no-op) or a real
+		 * failure. Recover via the retry path — but don't light the error LED
+		 * here: advertising_start() sets STATUS_ERROR only if the retry
+		 * genuinely can't advertise, so a transient race never shows red. */
+		LOG_WRN("slow advertising didn't start (err %d), retrying", err);
 		k_work_reschedule(&adv_retry_work, ADV_RETRY_DELAY);
 		return;
 	}
