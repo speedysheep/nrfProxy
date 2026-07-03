@@ -551,11 +551,38 @@ static void refresh_locked_mode(void)
 
 /* If a fresh link never encrypts, drop it — otherwise an attacker could sit on
  * the single connection slot unencrypted, blocking the owner. Armed on connect,
- * cancelled once security_changed reports level 2. */
-#define SECURITY_TIMEOUT K_SECONDS(10)
+ * cancelled once security_changed reports level 2.
+ *
+ * The window is per-mode. Locked mode: the bonded phone encrypts automatically
+ * within a couple of seconds, so 10 s is already generous and keeps squatters
+ * from blocking the owner for long. Pairing mode: the timeout must cover the
+ * *human* finding and accepting Android's pairing dialog — disconnecting while
+ * SMP is in flight aborts the procedure, which Android reports as a scary
+ * "couldn't pair: incorrect PIN" failure (observed on hardware with a flat
+ * 10 s). A long window is free of security cost here: with no bond stored
+ * there is no owner to protect, and anyone connecting could simply pair. */
+#define SECURITY_TIMEOUT_LOCKED  K_SECONDS(10)
+#define SECURITY_TIMEOUT_PAIRING K_SECONDS(60)
 static struct k_work_delayable security_timeout_work;
 
-static void security_timeout_handler(struct k_work *work)
+/* Pairing is driven by the CENTRAL, not the peripheral: we deliberately do NOT
+ * send an SMP Security Request. A peripheral-initiated Security Request makes
+ * Android raise a premature pre-negotiation pairing consent AND then the real
+ * LE-Secure-Connections consent — two dialogs for one bond, first appears to
+ * fail (confirmed on a Pixel 6a via the BluetoothBondStateMachine trace: one
+ * BONDING→BONDED session issuing two ACTION_PAIRING_REQUEST intents,
+ * pairingAlgo 0 then 3). Instead the bafflingvision app calls createBond()
+ * after service discovery, so Android owns a single, clean pairing flow; on a
+ * bonded reconnect the central initiates LTK encryption on its own. Either way
+ * on_security_changed reports level 2 and the watchdog below is cancelled.
+ * (Trade-off: a non-app central like nRF Connect must initiate pairing itself;
+ * if nothing encrypts the link within the window, the watchdog drops it.) */
+
+/* If the current link is still up and not yet encrypted, take a reference to
+ * it (so a concurrent disconnect can't free it under us — same discipline as
+ * ble_write_thread) and return it; the caller must bt_conn_unref(). Returns
+ * NULL when there's nothing to act on. */
+static struct bt_conn *ref_unsecured_conn(void)
 {
 	struct bt_conn *conn = NULL;
 
@@ -564,6 +591,13 @@ static void security_timeout_handler(struct k_work *work)
 		conn = bt_conn_ref(current_conn);
 	}
 	k_mutex_unlock(&conn_mutex);
+
+	return conn;
+}
+
+static void security_timeout_handler(struct k_work *work)
+{
+	struct bt_conn *conn = ref_unsecured_conn();
 
 	if (conn) {
 		LOG_WRN("Link not encrypted within timeout; disconnecting");
@@ -647,14 +681,12 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 	/* Advertising stopped on connect; don't let the fast->slow switch fire. */
 	k_work_cancel_delayable(&adv_slow_work);
 
-	/* As peripheral this sends an SMP Security Request, triggering Just Works
-	 * pairing on a new phone or LTK encryption on the bonded one. Arm the
-	 * watchdog so a link that never encrypts gets dropped. */
-	err = bt_conn_set_security(conn, BT_SECURITY_L2);
-	if (err) {
-		LOG_WRN("bt_conn_set_security failed (%d)", err);
-	}
-	k_work_reschedule(&security_timeout_work, SECURITY_TIMEOUT);
+	/* We do NOT request security here (see the security_timeout_work comment):
+	 * the central drives pairing/encryption. Just arm the watchdog so a link
+	 * that never encrypts gets dropped. */
+	k_work_reschedule(&security_timeout_work,
+			  locked_mode ? SECURITY_TIMEOUT_LOCKED
+				      : SECURITY_TIMEOUT_PAIRING);
 
 	set_status_leds(STATUS_CONNECTED);
 }

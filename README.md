@@ -122,15 +122,18 @@ Logging goes to each board's default console, which is board-dependent:
 
 ## Pairing / security lock
 
-The bridge **locks to the first phone that pairs with it**. On the first connection the
-device requests encryption, so the phone shows the system **Just Works pairing dialog** (no
-PIN); once paired, the bond is stored in flash and:
+The bridge **locks to the first phone that pairs with it**. Pairing is initiated by the
+**central** (the connecting app), which shows the system **Just Works pairing dialog** (no
+PIN) — the firmware deliberately doesn't send its own SMP Security Request, as that made some
+Android phones pop two dialogs for one bond. A generic BLE client (e.g. nRF Connect) must
+therefore start pairing itself. Once paired, the bond is stored in flash and:
 
 - Only the bonded phone can reconnect — the device advertises with a link-layer **filter
   accept list**, so other phones can still *see* it in a scan but their connection attempts
   are ignored.
-- Serial data flows **only after the link is encrypted**. A link that hasn't encrypted
-  within ~10 s is disconnected.
+- Serial data flows **only after the link is encrypted**. A link that never encrypts is
+  disconnected (after ~10 s once locked; first-time pairing gets ~60 s so there's time to
+  accept the pairing dialog).
 - The bond **survives power loss** and re-pairs automatically on reconnect (no new dialog).
 
 **Factory reset (hand the device to a new phone):** hold the board's **bond-reset button

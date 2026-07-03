@@ -94,12 +94,25 @@ most of all).
 
 - Add `security_changed` to the existing `bt_conn_cb`; track a `link_secure` flag
   (guard with `conn_mutex`, same discipline as `current_conn`).
-- In `on_connected` (err == 0): call `bt_conn_set_security(conn, BT_SECURITY_L2)` — as
-  peripheral this sends an SMP Security Request, which triggers pairing on a new phone
-  or LTK encryption on the bonded one (Android handles both automatically).
-- **Security watchdog**: schedule a `k_work_delayable` (~10 s) on connect; if
+- Add `security_changed` to the `bt_conn_cb` and set `link_secure` at level ≥ 2.
+  **Hardware finding — do NOT send a peripheral SMP Security Request.** The original design
+  called `bt_conn_set_security(conn, BT_SECURITY_L2)` in `on_connected` (later from ~1 s
+  delayed work) so the peripheral would trigger pairing/encryption. On a Pixel 6a this made
+  Android raise **two** pairing dialogs for a single bond — a premature pre-negotiation
+  consent the instant the Security Request arrived (`pairingAlgo=0`), then the real LE Secure
+  Connections consent (`pairingAlgo=3`), with the first appearing to fail (root-caused from
+  the `BluetoothBondStateMachine` trace: one continuous BONDING→BONDED session, two
+  `sendPairingRequestIntent`s). Delaying the request did not help. Fix: **remove it and let
+  the central drive pairing** — the bafflingvision app calls `createBond()` after service
+  discovery (single, Android-owned pairing); a bonded reconnect encrypts on the central's
+  own initiative. Trade-off: a non-app central must initiate pairing itself.
+- **Security watchdog**: schedule a `k_work_delayable` on connect; if
   `link_secure` is still false when it fires, `bt_conn_disconnect()`. Cancel it in
-  `security_changed` (success) and on disconnect.
+  `security_changed` (success) and on disconnect. **Hardware finding:** the window must
+  be per-mode — ~10 s is fine in locked mode (LTK encryption is automatic), but pairing
+  mode needs ~60 s to cover the user finding/accepting Android's pairing dialog.
+  Disconnecting mid-SMP aborts the pairing, which Android surfaces as a "couldn't pair:
+  incorrect PIN" failure (observed with a flat 10 s window).
 - Gate the data paths: `nus_received` drops incoming writes and `ble_write_thread`
   skips sends while `link_secure` is false. (Without `BT_NUS_AUTHEN` the GATT perms are
   open, so this app-level gate is the actual enforcement.)
@@ -219,14 +232,15 @@ firmware side is implemented:
 The nrfProxy firmware (the BLE↔UART bridge this app talks to over NUS) is gaining
 **bond-to-first-phone security**. Firmware behavior after the change:
 
-- On first connection the device sends an SMP **Security Request** right after connect;
-  Android will show the system **Just Works pairing dialog** (no PIN). The resulting
-  bond is stored on both sides.
+- On first connection the **app initiates pairing** with `createBond()` after service
+  discovery (the firmware does *not* send a Security Request); Android shows the system
+  **Just Works pairing dialog** (no PIN). The resulting bond is stored on both sides.
 - After pairing, the device only accepts connections from the bonded phone (link-layer
   filter accept list). Other phones still *see* it in scans but connect attempts time
   out.
 - NUS data is dropped by the firmware until the link is **encrypted** (security level 2).
-  The firmware disconnects any link that hasn't encrypted within ~10 s.
+  The firmware disconnects any link that never encrypts (~10 s once bonded/locked; ~60 s
+  during first-time pairing so the user has time to accept the dialog).
 - A hardware button on the device wipes the bond (factory reset to "pairing mode").
 
 Update `transport/BleSerialLink.kt` (and related UI) to handle this. Requirements:
