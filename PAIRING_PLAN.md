@@ -5,8 +5,14 @@ bond survives power loss (stored in flash), and a **hardware button** wipes it s
 phone can take ownership. This closes TODO.md M3 (unauthenticated NUS) without needing
 per-unit secrets or a display.
 
-Status: **plan only — nothing implemented yet.** Research verified against NCS v3.3.1
-(`C:\ncs\v3.3.1`) on 2026-07-02.
+Status: **implemented and hardware-tested** (bonds to the first phone, filter-accept-list
+locked mode, app-layer encryption gate + per-mode security watchdog, per-board bond-reset
+button). Research originally verified against NCS v3.3.1 (`C:\ncs\v3.3.1`) on 2026-07-02;
+implemented and hardware-confirmed with the bafflingvision app since. Outstanding: the §6
+checks marked below (BT-address stability across boots, RPA resolution against the accept
+list). One later change — dropping the firmware's SMP Security Request and having the app
+drive pairing via `createBond()` (see §3 step 3) — is compile-verified but **not yet
+hardware-confirmed** as a single-dialog flow.
 
 ---
 
@@ -245,14 +251,20 @@ The nrfProxy firmware (the BLE↔UART bridge this app talks to over NUS) is gain
 
 Update `transport/BleSerialLink.kt` (and related UI) to handle this. Requirements:
 
-1. **Bonding flow**: after `connectGatt` + service discovery, the firmware's Security
-   Request will trigger Android's pairing dialog automatically. Register a
-   `BroadcastReceiver` for `BluetoothDevice.ACTION_BOND_STATE_CHANGED` for the target
-   device during connection; if state goes `BOND_BONDING`, hold off on GATT operations
-   (especially the CCC descriptor write that enables NUS notifications) and retry them
-   once `BOND_BONDED` arrives. If the CCC write or a characteristic write fails with
-   GATT_INSUFFICIENT_AUTHENTICATION (5) / GATT_INSUFFICIENT_ENCRYPTION (15), treat it
-   the same way: wait for bonding, then retry once.
+1. **Bonding flow**: the firmware does **NOT** send an SMP Security Request, so the app
+   must drive pairing itself — after `connectGatt` + service discovery, **call
+   `createBond()`** on the target device; Android then shows the single Just Works pairing
+   dialog. (Do not rely on a peripheral-initiated request triggering the dialog — the
+   firmware deliberately removed it because a peripheral Security Request made Android pop
+   *two* dialogs for one bond; see §3 step 3.) Register a `BroadcastReceiver` for
+   `BluetoothDevice.ACTION_BOND_STATE_CHANGED` for the target device during connection —
+   on **Android 14+ it must be registered `RECEIVER_EXPORTED`**, or the system never
+   delivers the bond-state broadcast (a real bug already hit and fixed). If state goes
+   `BOND_BONDING`, hold off on GATT operations (especially the CCC descriptor write that
+   enables NUS notifications) and retry them once `BOND_BONDED` arrives. If the CCC write
+   or a characteristic write fails with GATT_INSUFFICIENT_AUTHENTICATION (5) /
+   GATT_INSUFFICIENT_ENCRYPTION (15), treat it the same way: wait for bonding, then retry
+   once.
 2. **UI states**: surface "Pairing…" during `BOND_BONDING` (map into the existing
    transport-neutral `UiState` machinery — probably as a `Connecting` message variant,
    not a new state, unless a new state is cleaner). On `BOND_NONE` after a bonding
