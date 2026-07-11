@@ -30,6 +30,22 @@ Ground rules for whoever implements this (per CLAUDE.md conventions):
 Tasks are in recommended order. 1 and 2 are quick; 3+4 are one small feature; 5 is a
 test scaffold; 6 is a refactor to do *before* hook logic lands; 7–8 are cleanup.
 
+## Progress (2026-07-11, branch `review-followups`)
+
+- ✅ **Task 1** — done (docs only). `PAIRING_PLAN.md` §7 req 1 rewritten for the
+  `createBond()` flow + Android 14 `RECEIVER_EXPORTED` note; status line corrected. The
+  §5 first-bullet update is intentionally deferred to Task 2 (it depends on the watchdog
+  change).
+- ✅ **Task 7 item 5** — done (docs only). README intro reordered; debug-vs-production
+  wording disambiguated. The rest of Task 7 (items 1–4) edits `src/main.c` and is still
+  pending.
+- ⛔ **Tasks 2, 3, 4, 5, 6, and Task 7 items 1–4** — BLOCKED. The NCS v3.3.1 toolchain is
+  not installed on the machine used this session (no `C:\ncs\`, `west` not on PATH), so
+  the mandatory six-config compile verification can't be run. These were deliberately
+  **not** attempted, to avoid committing unverified firmware. Resume them once the
+  build environment is available (see the "Ground rules" build/verify block above).
+- **Task 8** — reference checklist; no code action by design.
+
 ---
 
 ## Task 1 — Fix the stale/contradictory parts of PAIRING_PLAN.md  *(docs only, 5 min)*
