@@ -3,10 +3,6 @@
 A Zephyr / nRF Connect SDK application that bridges a serial UART to a phone over
 Bluetooth LE, acting as a **bidirectional proxy**:
 
-Note this project is almost entirely written by Claude. Progress is wonderful! 
-
-"Production" builds are just the regular build, but with optimizations enabled and debug console disabled. This is to limit power drain.
-
 - **Serial → phone:** bytes received on UART1 are forwarded as BLE notifications via the
   Nordic UART Service (NUS).
 - **Phone → serial:** bytes written to the NUS RX characteristic are sent out UART1.
@@ -14,6 +10,11 @@ Note this project is almost entirely written by Claude. Progress is wonderful!
 UART1 is the data channel on every board; the default baud rate is **115200** (share a
 common ground with your serial source). Connect and test with the *nRF Connect for Mobile*
 or *nRF Toolbox* apps.
+
+Note this project is almost entirely written by Claude. Progress is wonderful!
+
+"Production" builds are just the regular build, but with optimizations enabled and the
+debug console disabled, to limit power drain.
 
 ## Supported boards
 
@@ -95,6 +96,11 @@ NRFPROXY_NCS=~/ncs/v3.3.1 ./build.sh
 
 The build directories are generated output (gitignored); the wrapper scripts are the
 committed source of truth for each configuration. Each rebuild is pristine.
+
+"Debug" vs. "production" above describes the **build**, not the board. The XIAO BLE is the
+production *board* (see `boards/xiao_ble_nrf52840.conf`): its `xiao_prod` build is the
+shipping configuration, while the plain `xiao` build is the same board with logging and the
+USB console kept for bench work. The DK and Dongle are bench/debug boards only.
 
 ### Flashing
 
