@@ -39,7 +39,8 @@ generic clients (nRF Connect / nRF Toolbox) work for debugging.
 
 | Path | Role |
 |------|------|
-| `src/main.c` | The entire application (~1080 lines): UART async driver glue, BLE/NUS, bridge logic, LEDs, pairing lock, identity. |
+| `src/main.c` | The application's Zephyr/BLE glue: UART async driver, BLE/NUS, bridge orchestration, LEDs, pairing lock, identity application. |
+| `src/proxy_core.{c,h}` | The pure logic `main.c` decides with: interception hooks, identity derivation, advertising/forwarding predicates, NUS chunk sizing and send-error policy. No Zephyr dependency, by rule — that is what makes it unit-testable. |
 | `prj.conf` | Shared Kconfig: BLE peripheral + NUS, pairing/bond persistence, MTU/DLE throughput, async UART. |
 | `prod.conf` | Production fragment (opt-in via `EXTRA_CONF_FILE`): drops `CONFIG_LOG` and the USB CDC-ACM console. Must never strip the pairing-lock configs (`BT_SMP`/`BT_SETTINGS`/`NVS`). |
 | `boards/<target>.overlay` | Per-board devicetree: enables UART1 + pins, LED role aliases, bond-reset button, DC/DC. Filename = full normalized board target (incl. variant, e.g. `_uf2`). |

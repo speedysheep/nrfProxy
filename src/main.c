@@ -11,7 +11,6 @@
  * NUS TX characteristic, and the serial bytes stream in.
  */
 
-#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -30,6 +29,8 @@
 #include <zephyr/bluetooth/hci.h>
 
 #include <bluetooth/services/nus.h>
+
+#include "proxy_core.h"
 
 LOG_MODULE_REGISTER(nrf_proxy, LOG_LEVEL_INF);
 
@@ -66,39 +67,8 @@ RING_BUF_DECLARE(uart_tx_ringbuf, 2048);
 static uint8_t uart_tx_buf[UART_BUF_SIZE];
 static bool uart_tx_in_progress;
 
-/* --- Interception hooks --------------------------------------------------- */
-/*
- * Called for each chunk of data as it is received, before it is forwarded on.
- * Right now they copy the input straight through, unmodified. To inspect,
- * modify, filter, or append to the data, edit the bodies: write whatever you
- * want forwarded into `out` (up to `out_size` bytes) and return how many bytes
- * you wrote. Return 0 to drop the data entirely.
- *
- * `out` is a separate scratch buffer (not the receive buffer), so you can grow
- * the data up to PROC_BUF_SIZE. Bump PROC_BUF_SIZE if you need more headroom.
- */
-#define PROC_BUF_SIZE 512
-
-/* Serial -> phone: bytes received on UART1, before they go out over BLE. */
-static size_t on_uart_rx(const uint8_t *in, size_t in_len,
-			 uint8_t *out, size_t out_size)
-{
-	size_t n = MIN(in_len, out_size);
-	
-
-	memcpy(out, in, n);
-	return n;
-}
-
-/* Phone -> serial: bytes received over BLE, before they go out UART1. */
-static size_t on_ble_rx(const uint8_t *in, size_t in_len,
-			uint8_t *out, size_t out_size)
-{
-	size_t n = MIN(in_len, out_size);
-
-	memcpy(out, in, n);
-	return n;
-}
+/* The interception hooks (on_uart_rx / on_ble_rx) live in proxy_core.c — they
+ * are the designated extension point, and pure logic, so they are unit-tested. */
 
 /* --- Status LEDs --------------------------------------------------------- */
 /*
@@ -258,11 +228,20 @@ static bool bond_reset_requested(void)
 /* --- BLE ----------------------------------------------------------------- */
 
 #define DEVICE_NAME       CONFIG_BT_DEVICE_NAME
-#define DEVICE_NAME_LEN   (sizeof(DEVICE_NAME) - 1)
 
-/* Runtime advertised name: CONFIG_BT_DEVICE_NAME plus a "-XXXX" suffix derived
- * from the chip's hardware ID (filled in by identity_init()). */
-static char device_name[DEVICE_NAME_LEN + sizeof("-XXXX")];
+/* This unit's identity (name, address, per-device id), derived from the chip's
+ * hardware ID by identity_init(). proxy_core owns the derivation; these asserts
+ * pin the couplings it deliberately can't see, since it knows nothing of
+ * Kconfig or the BT types. */
+static struct proxy_identity identity;
+
+BUILD_ASSERT(PROXY_ADDR_LEN == BT_ADDR_SIZE,
+	     "proxy_core's address must match bt_addr_t");
+BUILD_ASSERT(sizeof(identity.name) <= CONFIG_BT_DEVICE_NAME_MAX + 1,
+	     "the derived name must fit what bt_set_name() accepts");
+BUILD_ASSERT(sizeof(DEVICE_NAME "-XXXX") <= PROXY_DEVICE_NAME_MAX,
+	     "CONFIG_BT_DEVICE_NAME is too long to carry the -XXXX suffix; "
+	     "units would be indistinguishable over the air");
 
 /* Manufacturer-specific advertising data, so a scanner can filter for *our*
  * boards without connecting. Layout on the wire:
@@ -273,12 +252,16 @@ static char device_name[DEVICE_NAME_LEN + sizeof("-XXXX")];
  */
 #define COMPANY_ID_LO 0xFF
 #define COMPANY_ID_HI 0xFF
+#define MFG_ID_OFFSET 4                /* company id (2) + magic tag (2) */
 
 static uint8_t mfg_data[] = {
 	COMPANY_ID_LO, COMPANY_ID_HI,  /* company id, little-endian */
 	'N', 'P',                      /* magic tag — what a scanner filters on */
 	0, 0, 0, 0,                    /* per-device id, set in identity_init() */
 };
+
+BUILD_ASSERT(sizeof(mfg_data) == MFG_ID_OFFSET + PROXY_MFG_ID_LEN,
+	     "the per-device id must fill the tail of the manufacturer AD");
 
 static struct bt_conn *current_conn;
 /* Guards current_conn so the writer thread can take a reference before use,
@@ -300,7 +283,7 @@ static bool locked_mode;
 /* Not const: ad[1].data_len is set once at runtime from the resolved name. */
 static struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
-	BT_DATA(BT_DATA_NAME_COMPLETE, device_name, 0),
+	BT_DATA(BT_DATA_NAME_COMPLETE, identity.name, 0),
 	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)),
 };
 
@@ -313,6 +296,7 @@ static const struct bt_data sd[] = {
  *   - a fixed random-static BT address (constant across reboots, unlike the
  *     default which is regenerated from the RNG each boot), and
  *   - a "-XXXX" name suffix so units are tellable apart in a scanner.
+ * proxy_identity_derive() does the deriving; this applies the result.
  * bt_id_create() must run before bt_enable(); the name is applied after.
  * If the hardware ID can't be read we fall back to the compile-time defaults. */
 static void identity_init(void)
@@ -320,34 +304,26 @@ static void identity_init(void)
 	uint8_t hwid[8];
 	ssize_t len;
 
-	/* Default name regardless of what follows; suffix appended on success. */
-	memcpy(device_name, DEVICE_NAME, DEVICE_NAME_LEN + 1);
-
 	len = hwinfo_get_device_id(hwid, sizeof(hwid));
-	if (len < 6) {
+	proxy_identity_derive(DEVICE_NAME, hwid, (int)len, &identity);
+
+	if (!identity.addr_valid) {
 		LOG_WRN("No hardware ID (%d); using default name/address",
 			(int)len);
 		return;
 	}
 
-	/* Fixed static-random address from the low 6 bytes of the chip id.
-	 * BT_ADDR_SET_STATIC forces the two MSBs that mark it static-random. */
 	bt_addr_le_t addr = { .type = BT_ADDR_LE_RANDOM };
 
-	memcpy(addr.a.val, hwid, 6);
-	BT_ADDR_SET_STATIC(&addr.a);
+	memcpy(addr.a.val, identity.addr, sizeof(addr.a.val));
 
 	int err = bt_id_create(&addr, NULL);
 	if (err < 0) {
 		LOG_WRN("bt_id_create failed (%d); using random address", err);
 	}
 
-	/* Unique name suffix from the top id bytes (e.g. "nrfProxy-3F7A"). */
-	snprintf(device_name + DEVICE_NAME_LEN, sizeof("-XXXX"), "-%02X%02X",
-		 hwid[5], hwid[4]);
-
 	/* Per-device id in the manufacturer advertising data (after the tag). */
-	memcpy(&mfg_data[4], hwid, 4);
+	memcpy(&mfg_data[MFG_ID_OFFSET], identity.mfg_id, sizeof(identity.mfg_id));
 }
 
 /* Two-phase advertising for power: advertise at the fast interval for quick
@@ -415,7 +391,12 @@ static void advertising_start(void)
 	int err;
 
 	k_mutex_lock(&conn_mutex, K_FOREVER);
-	if (current_conn || adv_active) {
+	const struct proxy_link_state state = {
+		.connected = (current_conn != NULL),
+		.adv_active = adv_active,
+	};
+
+	if (!proxy_should_start_adv(&state)) {
 		/* Connected, or an advertiser is already running (recycled
 		 * fired for the object released by the fast->slow switch). */
 		k_mutex_unlock(&conn_mutex);
@@ -432,7 +413,7 @@ static void advertising_start(void)
 		k_work_reschedule(&adv_retry_work, ADV_RETRY_DELAY);
 		return;
 	}
-	LOG_INF("Advertising as \"%s\" (fast, %s)", device_name,
+	LOG_INF("Advertising as \"%s\" (fast, %s)", identity.name,
 		locked_mode ? "locked" : "pairing");
 	adv_slow_phase = false;   /* brisk LED blink during the fast phase */
 	set_status_leds(STATUS_ADVERTISING);
@@ -551,18 +532,9 @@ static void refresh_locked_mode(void)
 
 /* If a fresh link never encrypts, drop it — otherwise an attacker could sit on
  * the single connection slot unencrypted, blocking the owner. Armed on connect,
- * cancelled once security_changed reports level 2.
- *
- * The window is per-mode. Locked mode: the bonded phone encrypts automatically
- * within a couple of seconds, so 10 s is already generous and keeps squatters
- * from blocking the owner for long. Pairing mode: the timeout must cover the
- * *human* finding and accepting Android's pairing dialog — disconnecting while
- * SMP is in flight aborts the procedure, which Android reports as a scary
- * "couldn't pair: incorrect PIN" failure (observed on hardware with a flat
- * 10 s). A long window is free of security cost here: with no bond stored
- * there is no owner to protect, and anyone connecting could simply pair. */
-#define SECURITY_TIMEOUT_LOCKED  K_SECONDS(10)
-#define SECURITY_TIMEOUT_PAIRING K_SECONDS(60)
+ * cancelled once security_changed reports level 2. The window is per-mode;
+ * proxy_security_window_ms() picks it and documents why the pairing one must
+ * stay long. */
 static struct k_work_delayable security_timeout_work;
 
 /* Pairing is driven by the CENTRAL, not the peripheral: we deliberately do NOT
@@ -685,8 +657,7 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 	 * the central drives pairing/encryption. Just arm the watchdog so a link
 	 * that never encrypts gets dropped. */
 	k_work_reschedule(&security_timeout_work,
-			  locked_mode ? SECURITY_TIMEOUT_LOCKED
-				      : SECURITY_TIMEOUT_PAIRING);
+			  K_MSEC(proxy_security_window_ms(locked_mode)));
 
 	set_status_leds(STATUS_CONNECTED);
 }
@@ -912,6 +883,11 @@ static int uart_init(void)
 
 /* --- BLE writer thread: ring buffer -> NUS notifications ------------------ */
 
+/* How long to wait out a transient BLE TX buffer shortage before re-sending the
+ * chunk we kept. Short enough that the 2048-byte RX ring (~180 ms of sustained
+ * 115200) doesn't overrun while we back off. */
+#define NUS_RETRY_DELAY_MS 10
+
 /* Discard everything in the RX ring buffer. Must only be called from
  * ble_write_thread: the ring is single-producer (UART ISR) / single-consumer
  * (this thread), and claim/finish is a pure consumer operation, safe against a
@@ -945,7 +921,12 @@ static void ble_write_thread(void)
 			 * freed by a concurrent disconnect while we use it. Only
 			 * forward once the link is encrypted (pairing lock). */
 			k_mutex_lock(&conn_mutex, K_FOREVER);
-			if (current_conn && link_secure) {
+			const struct proxy_link_state state = {
+				.connected = (current_conn != NULL),
+				.link_secure = link_secure,
+			};
+
+			if (proxy_may_forward(&state)) {
 				conn = bt_conn_ref(current_conn);
 			}
 			k_mutex_unlock(&conn_mutex);
@@ -958,13 +939,7 @@ static void ble_write_thread(void)
 				break;
 			}
 
-			/* Notification payload is limited to ATT_MTU - 3 (opcode +
-			 * handle overhead). The MTU is re-read every chunk because
-			 * the peer can negotiate it up mid-connection. The 20-byte
-			 * fallback is the minimum ATT MTU (23) minus that overhead
-			 * — used only if the stack reports a nonsense MTU. */
-			max_send = bt_gatt_get_mtu(conn);
-			max_send = (max_send > 3) ? (max_send - 3) : 20;
+			max_send = proxy_nus_chunk_limit(bt_gatt_get_mtu(conn));
 
 			claimed = ring_buf_get_claim(&uart_rx_ringbuf, &chunk,
 						     max_send);
@@ -974,16 +949,20 @@ static void ble_write_thread(void)
 			}
 
 			err = bt_nus_send(conn, chunk, claimed);
-			if (err == 0) {
+			switch (proxy_send_result(err)) {
+			case PROXY_SEND_CONSUMED:
 				/* Data was copied into the GATT buffer. */
 				ring_buf_get_finish(&uart_rx_ringbuf, claimed);
-			} else if (err == -ENOMEM || err == -EAGAIN) {
+				break;
+			case PROXY_SEND_RETRY:
 				/* No TX buffers right now: keep data, retry. */
 				ring_buf_get_finish(&uart_rx_ringbuf, 0);
-				k_sleep(K_MSEC(10));
-			} else {
+				k_sleep(K_MSEC(NUS_RETRY_DELAY_MS));
+				break;
+			case PROXY_SEND_DROP:
 				/* Disconnected / not subscribed: drop chunk. */
 				ring_buf_get_finish(&uart_rx_ringbuf, claimed);
+				break;
 			}
 
 			bt_conn_unref(conn);
@@ -1034,11 +1013,11 @@ int main(void)
 
 	/* Apply the resolved name to the GAP Device Name characteristic and the
 	 * advertising payload (both must happen after bt_enable). */
-	err = bt_set_name(device_name);
+	err = bt_set_name(identity.name);
 	if (err) {
 		LOG_WRN("bt_set_name failed (%d)", err);
 	}
-	ad[1].data_len = strlen(device_name);
+	ad[1].data_len = strlen(identity.name);
 
 	err = bt_nus_init(&nus_cb);
 	if (err) {

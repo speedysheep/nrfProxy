@@ -22,7 +22,15 @@ apps.
 
 ## Files
 
-- `src/main.c` — entire application (UART async driver, BLE/NUS, the bridge logic).
+- `src/main.c` — the application's Zephyr/BLE glue: UART async driver, BLE/NUS, LEDs,
+  connection lifetime, the locking.
+- `src/proxy_core.c` / `src/proxy_core.h` — the pure logic main.c decides with:
+  the interception hooks, identity derivation, the advertising/forwarding predicates,
+  NUS chunk sizing and send-error policy. **Binding rule: no Zephyr dependency of any
+  kind** (no kernel objects, BT calls, logging, or Kconfig symbols) — that's what makes
+  it unit-testable off-target, so types cross the boundary as plain bytes and
+  milliseconds and `main.c` BUILD_ASSERTs the couplings. Unit-tested under
+  `tests/unit/`.
 - `prj.conf` — Kconfig: BLE peripheral + NUS, async UART, MTU/throughput tuning, debug flags.
 - `prod.conf` — optional **production** fragment for the XIAO (battery use): drops logging
   and the USB CDC-ACM console. Applied via `EXTRA_CONF_FILE`, *not* auto-merged — see

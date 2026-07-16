@@ -93,6 +93,18 @@ this file (edit it — it's a living plan).
   running the ztest suites (Phases 3/4). Note this deviation was also forced: with no
   local SDK, a blind Twister/sysbuild/community-board bring-up could only have been
   iterated through CI.
+- **Phase 2 API deviation — `proxy_core` takes no Zephyr types at all.** The plan's
+  sketch had `bt_addr_le_t addr` in `struct proxy_identity`, `char name[CONFIG_BT_DEVICE_NAME_MAX]`,
+  and `k_timeout_t proxy_security_window(bool)`. All three would have dragged Zephyr into
+  the unit suites (BT headers, autoconf.h, the kernel timeout type) for no benefit, and the
+  plan already prefers "restructuring proxy_core to avoid it". So: the address crosses as
+  `uint8_t addr[6]`, the name buffer is `PROXY_DEVICE_NAME_MAX`, and the window is
+  `uint32_t proxy_security_window_ms(bool)`. `main.c` converts at the call site
+  (`K_MSEC(...)`, `memcpy` into `bt_addr_le_t.a.val`) and `BUILD_ASSERT`s each coupling
+  (`PROXY_ADDR_LEN == BT_ADDR_SIZE`, the name fits `CONFIG_BT_DEVICE_NAME_MAX`, the
+  per-device id fills the manufacturer AD tail). The payoff is real: the suites need no BT
+  config, and `proxy_core.c` compiles on a bare host — which is the only way anything in
+  this repo could be executed on this machine.
 - **⚠ The development machine cannot build this project.** Contrary to CLAUDE.md, this
   checkout's host has **no NCS install** (`C:\ncs` and `D:\ncs` are both absent/empty) and
   **no WSL distribution**. What it does have: mingw64 `gcc` 13.2, git, and a stray
