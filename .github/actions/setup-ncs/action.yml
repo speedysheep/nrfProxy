@@ -1,8 +1,11 @@
 name: Set up an nRF Connect SDK workspace
 description: >
-  Materialise an NCS west workspace at $GITHUB_WORKSPACE/ncs and check this repo
-  out at $GITHUB_WORKSPACE/app, mirroring the local build flow (west build runs
-  from inside the workspace with the app dir as the source dir).
+  Materialise an NCS west workspace at $GITHUB_WORKSPACE/ncs, mirroring the local
+  build flow (west build runs from inside the workspace with the app dir as the
+  source dir). The caller checks this repo out at $GITHUB_WORKSPACE/app first --
+  deliberately a sibling of the workspace, never nested inside it: west resolves
+  its topdir by walking up from the cwd, so a nested app would be read as part of
+  the workspace manifest.
 
 inputs:
   ncs-rev:
@@ -12,16 +15,8 @@ inputs:
 runs:
   using: composite
   steps:
-    # The workspace and the app are deliberately siblings, never nested: west
-    # resolves its topdir by walking up from the cwd, so an app checked out
-    # inside ncs/ would be treated as part of the workspace manifest.
-    - name: Check out the application
-      uses: actions/checkout@v5
-      with:
-        path: app
-
-    # The toolchain container runs as a different user than the one that owns the
-    # checkout, so every git call (including west's) needs the repos marked safe.
+    # The container user does not own the checkout, so git (including west's own
+    # calls) refuses to touch the repos until they are marked safe.
     - name: Trust the workspace directories
       shell: bash
       run: git config --global --add safe.directory '*'

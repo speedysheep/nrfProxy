@@ -81,14 +81,28 @@ this file (edit it — it's a living plan).
   comment block at the top of `ci.yml` and each phase appends its real job. Disabled
   placeholder jobs would have been dead weight in the final tree; the comment serves the
   same purpose (later phases only add a job) and keeps every commit's CI meaningful.
+- **Item 2 — Twister for the build matrix: NOT USED (deviation, Phase 1 layer 1
+  dropped).** The plan's own escape hatch applies ("the assertions matter, not the
+  harness") and the cost/benefit is one-sided here: for `build_only` scenarios Twister
+  contributes nothing the assertions don't already cover, while a repo-root
+  `testcase.yaml` would become a *third* copy of the board/flag table (after
+  `build.ps1`/`build.sh`) and bury each build under `twister-out/<platform>/`, away from
+  the `build_*/` dirs `check_configs.py` and the IDE expect. Instead the `build-matrix`
+  job fans out over the six targets and calls **`build.sh` itself**, so CI runs the
+  committed source of truth verbatim. Twister is still used where it earns its keep —
+  running the ztest suites (Phases 3/4). Note this deviation was also forced: with no
+  local SDK, a blind Twister/sysbuild/community-board bring-up could only have been
+  iterated through CI.
 - **⚠ The development machine cannot build this project.** Contrary to CLAUDE.md, this
-  checkout's host has **no NCS install** (`C:\ncs` and `D:\ncs` are both absent/empty), **no
-  Python**, and **no WSL distribution** — only mingw64 `gcc` 13.2 and git. Consequences,
-  which shaped the phases below: `check_configs.py` and the six-config matrix are
-  **CI-verified only**; and `proxy_core` was deliberately designed **free of every Zephyr
-  dependency** (see Phase 2) so its logic can be compiled and exercised on the host with
-  plain gcc as a local smoke check, independent of `native_sim`. Anything marked
-  "CI-verified" below has not run on this machine.
+  checkout's host has **no NCS install** (`C:\ncs` and `D:\ncs` are both absent/empty) and
+  **no WSL distribution**. What it does have: mingw64 `gcc` 13.2, git, and a stray
+  `python3.9` at `C:\ProgramData\mingw64\mingw64\opt\bin\python3.exe` (no `pip`, stdlib
+  only — which is why `check_configs.py` and its tests are stdlib-only and 3.8-compatible).
+  Consequences, which shaped the phases below: **the six-config build matrix is CI-verified
+  only** — nothing in this repo has been compiled for an nRF52840 on this machine; and
+  `proxy_core` was deliberately designed **free of every Zephyr dependency** (see Phase 2)
+  so its logic can be compiled and exercised on the host with plain gcc, independent of
+  `native_sim`. Anything marked "CI-verified" below has not run here.
 
 ---
 

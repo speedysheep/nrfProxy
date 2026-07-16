@@ -38,3 +38,46 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile(
             (Resolve-Path ./build.ps1).Path, [ref]$null, [ref]$errors) | Out-Null
           if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+
+      # Tests for the config checker itself: each one breaks a single invariant
+      # in a synthetic .config and asserts the matching check goes red. No SDK
+      # needed, so they belong here rather than in the matrix.
+      - name: Test the config checker
+        run: python3 scripts/test_check_configs.py
+
+  build-matrix:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.1
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [dk, xiao, xiao_prod, promicro, promicro_prod, dongle]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: app
+
+      - uses: ./app/.github/actions/setup-ncs
+        with:
+          ncs-rev: ${{ env.NCS_REV }}
+
+      # build.sh is the committed source of truth for every configuration, so CI
+      # runs the same command a developer does rather than a second copy of the
+      # board/flag table.
+      - name: Build
+        run: ./app/build.sh "${{ matrix.target }}" --ncs "$GITHUB_WORKSPACE/ncs" --proj "$GITHUB_WORKSPACE/app"
+
+      - name: Assert config invariants
+        run: python3 app/scripts/check_configs.py "${{ matrix.target }}" --proj app
+
+      - name: Upload the flashable image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-image
+          path: |
+            app/build_*/nrfProxy/zephyr/zephyr.hex
+            app/build_*/nrfProxy/zephyr/zephyr.uf2
+          if-no-files-found: error
+          retention-days: 14
