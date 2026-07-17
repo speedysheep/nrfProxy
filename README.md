@@ -1,5 +1,7 @@
 # nrfProxy
 
+[![CI](https://github.com/speedysheep/nrfProxy/actions/workflows/ci.yml/badge.svg)](https://github.com/speedysheep/nrfProxy/actions/workflows/ci.yml)
+
 A Zephyr / nRF Connect SDK application that bridges a serial UART to a phone over
 Bluetooth LE, acting as a **bidirectional proxy**:
 
@@ -117,6 +119,28 @@ The flashable image is under `<build dir>/nrfProxy/zephyr/`
 > **Deep build/flash details** (toolchain environment setup, per-board flash offsets, the
 > reason Partition Manager is disabled, and board-specific gotchas) live in
 > [`CLAUDE.md`](CLAUDE.md).
+
+## Testing
+
+Every push and pull request runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+inside Nordic's pinned toolchain container (`ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.1`),
+which materialises an NCS workspace and builds this repo as an out-of-tree application —
+the same flow as the wrapper scripts, just automated.
+
+| Layer | What it protects | Run it locally |
+|-------|------------------|----------------|
+| Build matrix | All six configurations compile | `.\build.ps1` / `./build.sh` |
+| Config assertions | Flash offsets, Partition Manager stays off, async-UART gating, `prod.conf` not stripping the pairing lock | `python scripts/check_configs.py <target> <build dir>` |
+| Unit tests | The pure logic in `src/proxy_core.c` (hooks, identity derivation, advertising/send policy) | `west twister -T app/tests/unit -p native_sim` |
+| Integration tests | The UART data path in `src/uart_bridge.c` (ring flow, TX chaining, RX recovery) | `west twister -T app/tests/integration -p native_sim` |
+
+Unit and integration tests run on Zephyr's **`native_sim`** board, which is **Linux-only** —
+on a Windows development machine run them under WSL or let CI run them; the firmware build
+matrix is the part that runs natively on Windows.
+
+Hardware behaviour (pairing dialogs, reconnect, throughput) is still verified by hand; see
+[`ADD_TESTING_PLAN.md`](ADD_TESTING_PLAN.md) for the full plan, the test IDs, and what is
+deliberately out of scope.
 
 ## Logging
 

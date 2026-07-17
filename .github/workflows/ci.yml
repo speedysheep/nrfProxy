@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The one place the SDK version is pinned. Dependabot does not understand this
+  # dependency (there is no manifest); bump it by hand alongside CLAUDE.md.
+  NCS_REV: v3.3.1
+
+# Job graph (see ADD_TESTING_PLAN.md):
+#   lint          — shell/script linting, no SDK needed
+#   build-matrix  — the six firmware configs + config assertions   (Phase 1)
+#   unit-tests    — twister, native_sim ztest suites               (Phase 3)
+#   integration   — twister, native_sim uart_bridge suites         (Phase 4)
+# BabbleSim end-to-end tests live in a separate nightly workflow and never gate
+# this one.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # shellcheck is preinstalled on the GitHub-hosted Ubuntu images.
+      - name: shellcheck build.sh
+        run: shellcheck build.sh
+
+      - name: Check PowerShell syntax (build.ps1)
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./build.ps1).Path, [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }

@@ -1,2 +1,6 @@
 build*/
 HANDOVER.md
+
+# Twister output (unit/integration test runs)
+twister-out/
+twister-out.*/

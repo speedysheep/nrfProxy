@@ -67,6 +67,29 @@ Decisions already made by the project owner (do not re-litigate):
 If a verification fails, implement the documented fallback and record the finding in
 this file (edit it — it's a living plan).
 
+### Findings log (filled in as the phases land)
+
+- **Item 1 — toolchain container: CONFIRMED.** `ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.1`
+  exists (tagged alongside `v3.3.1-rc1`, `v3.3.0`, …). It carries the **toolchain only**,
+  not the SDK source, so CI still has to `west init` a workspace — as the plan assumed. Its
+  Dockerfile sets `ENV BASH_ENV=/opt/non-interactive-setup.sh`, which sources
+  `/opt/toolchain-env.sh`, so the toolchain env (PATH, `ZEPHYR_SDK_INSTALL_DIR`) loads
+  automatically in GitHub Actions' non-interactive bash — no `nrfutil toolchain-manager
+  launch` wrapper needed. The `setup-ncs` composite action asserts this instead of assuming
+  it (`west --version` + a check that the `nrf` module is present).
+- **Phase 0 deviation — no `if: false` placeholder jobs.** The job graph is wired as a
+  comment block at the top of `ci.yml` and each phase appends its real job. Disabled
+  placeholder jobs would have been dead weight in the final tree; the comment serves the
+  same purpose (later phases only add a job) and keeps every commit's CI meaningful.
+- **⚠ The development machine cannot build this project.** Contrary to CLAUDE.md, this
+  checkout's host has **no NCS install** (`C:\ncs` and `D:\ncs` are both absent/empty), **no
+  Python**, and **no WSL distribution** — only mingw64 `gcc` 13.2 and git. Consequences,
+  which shaped the phases below: `check_configs.py` and the six-config matrix are
+  **CI-verified only**; and `proxy_core` was deliberately designed **free of every Zephyr
+  dependency** (see Phase 2) so its logic can be compiled and exercised on the host with
+  plain gcc as a local smoke check, independent of `native_sim`. Anything marked
+  "CI-verified" below has not run on this machine.
+
 ---
 
 ## Phase 0 — Repo scaffolding, Dependabot, CI skeleton  *(no firmware changes)*

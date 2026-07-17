@@ -93,9 +93,14 @@ build_config() {
   local board dir cmake_args
   IFS='|' read -r board dir cmake_args <<< "$spec"
 
-  # Source dir ($PROJ) before '--'; sysbuild/CMake args after it.
+  # Source dir ($PROJ) before '--'; sysbuild/CMake args after it. cmake_args is a
+  # flag list, so split it on whitespace into real array elements.
   local sep=()
-  [[ -n "$cmake_args" ]] && sep=(-- $cmake_args)
+  if [[ -n "$cmake_args" ]]; then
+    local args=()
+    read -ra args <<< "$cmake_args"
+    sep=(-- "${args[@]}")
+  fi
 
   echo "==> Building '$name' : $board -> $dir"
   # west build must run from inside the NCS workspace so the 'nrf' module is in scope.
