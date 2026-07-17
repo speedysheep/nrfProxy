@@ -6,4 +6,5 @@ project(nrfProxy)
 target_sources(app PRIVATE
   src/main.c
   src/proxy_core.c
+  src/uart_bridge.c
 )

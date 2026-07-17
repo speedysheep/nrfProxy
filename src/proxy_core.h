@@ -36,12 +36,15 @@ extern "C" {
  * `out` is a separate scratch buffer (not the receive buffer), so you can grow
  * the data up to PROC_BUF_SIZE. Bump PROC_BUF_SIZE if you need more headroom.
  *
- * ⚠ on_uart_rx runs in ISR context (the UART async callback) — keep it light.
- * on_ble_rx runs in the Bluetooth RX thread.
+ * Both run in thread context — on_uart_rx in ble_write_thread, on_ble_rx in the
+ * Bluetooth RX thread — so real filter/framing logic is fine here. (on_uart_rx
+ * used to run in the UART ISR; that was moved deliberately, because an ISR is
+ * the wrong place for the work these hooks exist for.)
  *
- * Both see transport chunks — whatever the UART's DMA delivered per
- * idle-timeout, or one GATT write — not framed application messages; add
- * reassembly if the data is message-oriented.
+ * Both see transport **chunks**, not framed application messages: on_ble_rx gets
+ * one GATT write; on_uart_rx gets whatever the RX ring held contiguously, capped
+ * at one notification's worth — which is *not* the UART's chunking. Nothing
+ * preserves message boundaries; add reassembly if the data is message-oriented.
  */
 #define PROC_BUF_SIZE 512
 
@@ -146,6 +149,18 @@ uint32_t proxy_security_window_ms(bool locked_mode);
  * per chunk because the peer can negotiate it up mid-connection; the fallback
  * covers a stack reporting a nonsense MTU. */
 uint16_t proxy_nus_chunk_limit(uint16_t att_mtu);
+
+/*
+ * Size of the next notification to send from a hook's output buffer, given how
+ * much has gone already. Returns 0 when there is nothing left.
+ *
+ * This exists because the hook may *grow* its input (up to PROC_BUF_SIZE = 512)
+ * while a notification is capped at the ATT MTU (<= 244), so one claimed chunk
+ * can need several sends. The ring bytes are already consumed by then -- the
+ * data lives in the scratch buffer -- so a retry must resend from that buffer
+ * and must never re-claim.
+ */
+size_t proxy_next_slice(size_t out_len, size_t sent, uint16_t max_send);
 
 enum proxy_send_verdict {
 	PROXY_SEND_CONSUMED,  /* copied into the GATT buffer — drop our copy */

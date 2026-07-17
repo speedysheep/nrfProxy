@@ -127,6 +127,53 @@ ZTEST(proxy_core_policy, test_nus_chunk_limit)
 	}
 }
 
+/* --- E8 (the pure half): slicing a grown hook output ---------------------- */
+/*
+ * The hook may grow a claimed chunk up to PROC_BUF_SIZE (512) while a
+ * notification is capped at the MTU, so one claim can need several sends. By
+ * then the ring bytes are gone -- the data is in the scratch buffer -- so this
+ * arithmetic is what stops a retry from re-claiming or from walking off the end.
+ */
+ZTEST(proxy_core_policy, test_next_slice_walks_a_grown_output)
+{
+	const uint16_t max_send = 244;   /* the MTU prj.conf negotiates for */
+	size_t out_len = PROC_BUF_SIZE;  /* the hook grew to the buffer limit */
+	size_t sent = 0;
+	size_t slice;
+	int slices = 0;
+
+	while ((slice = proxy_next_slice(out_len, sent, max_send)) > 0) {
+		zassert_true(slice <= max_send, "slice %u exceeds the MTU limit",
+			     (unsigned int)slice);
+		zassert_true(sent + slice <= out_len,
+			     "slicing would read past the hook's output");
+		sent += slice;
+		slices++;
+		zassert_true(slices <= 8, "slicing failed to terminate");
+	}
+
+	zassert_equal(sent, out_len, "sliced %u of %u bytes", (unsigned int)sent,
+		      (unsigned int)out_len);
+	zassert_equal(slices, 3, "512 bytes at 244 per notification is 3 sends");
+}
+
+ZTEST(proxy_core_policy, test_next_slice_edges)
+{
+	/* Nothing to send: a dropped chunk (hook returned 0) ends immediately. */
+	zassert_equal(proxy_next_slice(0, 0, 244), 0, "empty output must send nothing");
+	/* Done: sent == out_len terminates the loop. */
+	zassert_equal(proxy_next_slice(100, 100, 244), 0, "completed output must stop");
+	/* Defensive: sent past the end must not wrap into a huge slice. */
+	zassert_equal(proxy_next_slice(100, 150, 244), 0, "overshoot must not underflow");
+	/* Smaller than one notification: a single send. */
+	zassert_equal(proxy_next_slice(50, 0, 244), 50, "short output in one send");
+	/* Exactly one notification: one send, then done. */
+	zassert_equal(proxy_next_slice(244, 0, 244), 244, "exact fit in one send");
+	zassert_equal(proxy_next_slice(244, 244, 244), 0, "exact fit then done");
+	/* The 20-byte MTU fallback still makes progress. */
+	zassert_equal(proxy_next_slice(512, 0, 20), 20, "fallback MTU slices at 20");
+}
+
 /* --- D5: send-error policy ------------------------------------------------ */
 
 ZTEST(proxy_core_policy, test_send_result_classification)

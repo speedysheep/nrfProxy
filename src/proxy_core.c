@@ -100,6 +100,18 @@ uint16_t proxy_nus_chunk_limit(uint16_t att_mtu)
 	return PROXY_NUS_CHUNK_FALLBACK;
 }
 
+size_t proxy_next_slice(size_t out_len, size_t sent, uint16_t max_send)
+{
+	size_t remaining;
+
+	if (sent >= out_len) {
+		return 0;
+	}
+
+	remaining = out_len - sent;
+	return (remaining < max_send) ? remaining : max_send;
+}
+
 enum proxy_send_verdict proxy_send_result(int bt_nus_send_err)
 {
 	switch (bt_nus_send_err) {

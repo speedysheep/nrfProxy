@@ -1,0 +1,7 @@
+tests:
+  uart_bridge.integration:
+    platform_allow:
+      - native_sim
+    tags:
+      - uart_bridge
+      - integration

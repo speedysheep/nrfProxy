@@ -110,6 +110,40 @@ this file (edit it — it's a living plan).
   `proxy_core.h` now says byte-deterministic. C6 asserts field-by-field rather than one
   `memcmp` over the struct, since struct padding is written by nobody and would make a
   whole-struct compare a layout tripwire instead of a determinism check.
+- **Item 3 — `uart_emul` async: CONFIRMED.** The emulated driver implements the async API
+  (`.callback_set`/`.tx`/`.rx_enable`/`.rx_buf_rsp` under `#ifdef CONFIG_UART_ASYNC_API`),
+  so Phase 4's **Option A** stands and the stub-uart fallback (Option B) was not needed —
+  the integration suite drives the real `uart_bridge.c`. Two things the plan didn't record:
+  `CONFIG_UART_EMUL` depends on `EMUL` (and defaults `y` once the DT node exists), and the
+  data-injection helpers (`uart_emul_put_rx_data` / `uart_emul_get_tx_data`) live in
+  `<zephyr/drivers/serial/uart_emul.h>` — *not* `<zephyr/drivers/uart_emul.h>`, which is the
+  unrelated bus-emulation header.
+- **⚠ Phase 4 coverage gaps (deliberate, and not yet verified anywhere).** The E-group as
+  written covers **E1, E2, E3, E7** plus a few neighbours (a chunk spanning several driver
+  buffers, back-to-back sends keeping order, `finish(0)` keeping data for the retry path).
+  Not covered, and why:
+  - **E4** (exactly one transfer in flight) and **E5** (`uart_tx` start failure → staged
+    chunk dropped, pipeline recovers): `uart_emul` offers no hook to fail a `uart_tx()`
+    start or to observe transfers overlapping — `uart_emul_set_errors()` injects *RX* line
+    errors. Both would need Option B's stub layer, which Option A otherwise makes
+    unnecessary. E3/back-to-back ordering covers the chaining *observably* (bytes arrive
+    whole and in order), just not the internal flag.
+  - **E6** (slab-empty → `UART_RX_DISABLED` → automatic restart): reaching it means starving
+    the 4-buffer slab, which needs the consumer to stall while the emulator keeps
+    delivering — timing-dependent enough to be a flaky test rather than a useful one. It
+    stays a review/bench item, and is coupled to Task 3 anyway (today a failed restart is
+    permanent RX death).
+  - **E8** (hook-in-thread slicing): its pure half is unit-tested in `tests/unit/policy`
+    via `proxy_next_slice` (grow-to-512 → 3 slices at 244, the empty/exact/overshoot
+    edges). The loop that calls `bt_nus_send` per slice lives in `main.c`'s
+    `ble_write_thread` and needs a BLE peer, so the rest belongs to bsim/bench.
+- **⚠ The whole E group is CI-verified only** — and unlike the unit suites it could not be
+  run against the host shim (it needs Zephyr's ring buffers, work queues and the emulated
+  driver). Its timing assumptions (a 50 ms RX idle timeout plus the emulator's work-queue
+  hop, waited out with generous settle/timeout margins) are the most likely thing to need a
+  fix on first CI run. Assertions were kept tolerant where exact behaviour is timing-bound
+  (E2 asserts "no more than capacity, surviving bytes are an intact prefix, ring still
+  works after" rather than an exact byte count).
 - **Phase 2 API deviation — `proxy_core` takes no Zephyr types at all.** The plan's
   sketch had `bt_addr_le_t addr` in `struct proxy_identity`, `char name[CONFIG_BT_DEVICE_NAME_MAX]`,
   and `k_timeout_t proxy_security_window(bool)`. All three would have dragged Zephyr into
