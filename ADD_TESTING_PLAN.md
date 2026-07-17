@@ -471,6 +471,42 @@ follow-ups here.
 Dependencies: Phases 0–2 (Phase 4 not strictly required). Acceptance: F1+F2 green in
 the nightly workflow.
 
+### ⛔ Status: NOT IMPLEMENTED — deliberately deferred (2026-07-16)
+
+Phases 0–4 are in. Phase 5 was not attempted, and the reason is the environment finding
+above rather than the difficulty: **this machine has no NCS install, so nothing here can be
+built or run.** Every other phase had a way to earn confidence without one — the config
+checker has its own tests, `proxy_core` compiles and executes on the host, and even the
+integration suite is a small, conventional Twister app. Phase 5 has none: it needs
+BabbleSim itself built (`make everything`), a bsim overlay solving the "where does UART1
+data come from" problem, a companion central, and a runner asserting on device exit codes —
+a stack whose first working version is *found* by iterating, not written correctly blind.
+Committing ~500 lines of untestable scaffolding that has never executed would have been
+worse than nothing: it looks like coverage, gates nothing (nightly, `continue-on-error`),
+and the next person would have to debug code no one has ever run. The plan calls Phase 5 a
+stretch and requires CI to be green without it, so stopping here is within its terms.
+
+What is already settled for whoever picks it up:
+
+- **Item 4 — board target: `nrf52_bsim`** (`boards/native/nrf_bsim/nrf52_bsim.yaml`; no
+  variant suffix). Still to check in the CI workspace: whether `west list | grep bsim`
+  shows the babblesim modules after a `--narrow` update, since that is a *manifest group*
+  question and the narrow clone may omit them.
+- **Item 5 — `bt_nus_client`: CONFIRMED** in NCS v3.3.1
+  (`include/bluetooth/services/nus_client.h`: `struct bt_nus_client`,
+  `bt_nus_client_init()`, `bt_nus_client_send()`), so the central has a ready-made NUS
+  client.
+- **The hard part is F7/UART feeding, not the BLE side.** F1–F6 only need the BLE path;
+  the peripheral's data source can stay silent for them. Ship F1+F2 first (they cover the
+  two advertising field bugs — the highest-value pair), and treat the UART feeder (a
+  test-only thread behind a `CONFIG_*` flag is simpler than wiring a bsim UART backend) as
+  a separate step for F7.
+- **What Phase 5 would add over what now exists.** D6 already replays the F2/F3 orderings
+  as decision-function sequences, and states so honestly: it is a *model* of `main.c`'s
+  callbacks, so it cannot catch main.c wiring an event to the wrong callback. That gap —
+  plus the pairing lock end-to-end (F4/F5/F6) — is precisely what bsim would close, and
+  until then it stays with the manual checklist.
+
 ## Deliberately out of scope
 
 - Hardware-in-the-loop CI (user does hardware testing by hand; §Pre-ship checklist in
@@ -507,3 +543,28 @@ with the six-config verification results in the message.
    what's left.
 5. This file updated: verify-before-use findings recorded, IDs checked off, deviations
    explained.
+
+### Where it actually stands (2026-07-16, Phases 0–4 implemented)
+
+| # | Status |
+|---|--------|
+| 1 | **Done, pending first CI run.** `dependabot.yml`, and `ci.yml` with `lint` + `build-matrix` (six targets × `check_configs.py`) + `unit-tests` + `integration`. The badge is in the README; it cannot be green until this lands on `main`. |
+| 2 | **Done for the config invariants** (A7–A11, each with a test that deliberately breaks it) **and the predicates** (D1/D2/D6, plus the SPSC drain via E7). Not covered: the TX in-progress flag (E4/E5 — no `uart_emul` hook), slab-starvation recovery (E6). |
+| 3 | **Done.** `main.c` is glue (~915 lines, from ~1080 while gaining nothing); `proxy_core` (pure, 24 unit tests) and `uart_bridge` (integration-tested) carry the logic. |
+| 4 | **Not done — documented.** See the Phase 5 status section. |
+| 5 | **Done.** Findings log above; deviations (no Twister for the matrix, no Zephyr types in `proxy_core`, no placeholder CI jobs) each recorded with a reason. |
+
+**The honest headline: nothing in Phases 0–4 has been compiled for an nRF52840, and no
+`native_sim` test has run.** This machine has no NCS install (see the findings log), so the
+first CI run is the first real build. What *was* executed: the 21 `check_configs.py` tests
+and the 24 `proxy_core` unit tests (the latter by compiling the real suite sources against a
+host ztest shim with gcc — which is how the C6 determinism defect was caught and fixed).
+`main.c`, `uart_bridge.c`, the six-config matrix, and the whole E group are review-verified
+only. Expect the first CI run to need fixes; the likeliest candidates, in order: the
+integration suite's timing margins, the `west init`/cache step, and the container's
+toolchain env.
+
+**Bench test owed to the user (Phase 4b changed behaviour):** stream sustained 115200
+serial → phone and confirm no loss or reordering (this direction changed: the hook moved out
+of the ISR and sends are now sliced), then write phone → serial and confirm the bytes appear
+on UART1. Also worth a glance: the advertised name still reads `nrfProxy-XXXX`.
