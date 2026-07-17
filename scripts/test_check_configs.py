@@ -56,10 +56,11 @@ class CheckConfigsTest(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.root, True)
 
-    def build_dir(self, config_text, name="build_xiao"):
+    def build_dir(self, config_text, name="build_xiao", image=None):
         """Write a synthetic build dir containing just the app's .config."""
         path = os.path.join(self.root, name)
-        config = os.path.join(path, check_configs.CONFIG_PATH)
+        config = os.path.join(path, image or check_configs.IMAGE_DIR,
+                              check_configs.CONFIG_TAIL)
         os.makedirs(os.path.dirname(config), exist_ok=True)
         with open(config, "w", encoding="utf-8") as f:
             f.write(config_text)
@@ -185,6 +186,54 @@ class CheckConfigsTest(unittest.TestCase):
         self.assertIn("A11", failed_ids(results))
 
     # --- plumbing ---------------------------------------------------------
+
+    # --- locating the application image ----------------------------------
+
+    def test_finds_image_dir_named_after_a_different_checkout(self):
+        """sysbuild names the image after the app's source directory.
+
+        CI checked the repo out as app/ and the image became app/, so a
+        hard-coded "nrfProxy/" made every target fail on a build that had in
+        fact succeeded.
+        """
+        path = self.build_dir(GOOD_XIAO, image="app")
+        results = check_configs.check_target(
+            "xiao", check_configs.TARGETS["xiao"], path)
+        self.assertEqual(failed_ids(results), [])
+
+    def test_sysbuild_own_config_is_not_mistaken_for_the_app(self):
+        """<build>/zephyr/.config is sysbuild's own, one level above the images."""
+        path = self.build_dir(GOOD_XIAO, image="app")
+        sysbuild_config = os.path.join(path, "zephyr", ".config")
+        os.makedirs(os.path.dirname(sysbuild_config), exist_ok=True)
+        with open(sysbuild_config, "w", encoding="utf-8") as f:
+            f.write("CONFIG_SB_SOMETHING=y\n")
+
+        results = check_configs.check_target(
+            "xiao", check_configs.TARGETS["xiao"], path)
+        self.assertEqual(failed_ids(results), [])
+
+    def test_ambiguous_image_dirs_report_cleanly(self):
+        path = self.build_dir(GOOD_XIAO, image="app")
+        second = os.path.join(path, "mcuboot", check_configs.CONFIG_TAIL)
+        os.makedirs(os.path.dirname(second), exist_ok=True)
+        with open(second, "w", encoding="utf-8") as f:
+            f.write(GOOD_XIAO)
+
+        with self.assertRaises(check_configs.CheckError):
+            check_configs.check_target(
+                "xiao", check_configs.TARGETS["xiao"], path)
+
+    def test_documented_layout_wins_over_the_fallback(self):
+        path = self.build_dir(GOOD_XIAO)
+        stray = os.path.join(path, "somethingelse", check_configs.CONFIG_TAIL)
+        os.makedirs(os.path.dirname(stray), exist_ok=True)
+        with open(stray, "w", encoding="utf-8") as f:
+            f.write(GOOD_XIAO.replace("CONFIG_UART_1_ASYNC=y\n", ""))
+
+        results = check_configs.check_target(
+            "xiao", check_configs.TARGETS["xiao"], path)
+        self.assertEqual(failed_ids(results), [])
 
     def test_missing_build_dir_reports_cleanly(self):
         with self.assertRaises(check_configs.CheckError):

@@ -29,6 +29,7 @@ and next to build.ps1 on a Windows box (the NCS toolchain bundles python).
 """
 
 import argparse
+import glob
 import os
 import re
 import sys
@@ -78,8 +79,12 @@ TARGETS = {
 }
 
 # The application image's .config, relative to the build dir. sysbuild is kept
-# (only Partition Manager is off), so the app lives in its own image subdir.
-CONFIG_PATH = os.path.join("nrfProxy", "zephyr", ".config")
+# (only Partition Manager is off), so the app lives in its own image subdir --
+# named after the application's *source directory*, which is why this is not
+# simply hard-coded (see find_app_config).
+IMAGE_DIR = "nrfProxy"
+CONFIG_TAIL = os.path.join("zephyr", ".config")
+CONFIG_PATH = os.path.join(IMAGE_DIR, CONFIG_TAIL)
 
 _ASSIGNMENT = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$")
 
@@ -107,6 +112,33 @@ def load_config(path):
     if not values:
         raise CheckError("{} has no CONFIG_ assignments".format(path))
     return values
+
+
+def find_app_config(build_dir):
+    """Locate the application image's .config inside a sysbuild build dir.
+
+    sysbuild names the image directory after the application's source directory,
+    so a checkout in a differently-named directory (a fork, a CI checkout path)
+    silently moves this file -- hard-coding "nrfProxy/" would make the checker
+    pass or fail on what the repo folder happens to be called. Prefer the
+    documented layout, then fall back to whatever single image dir is present:
+    with Partition Manager off there is exactly one image, and sysbuild's own
+    Kconfig output lives at <build>/zephyr/.config, one level up from the glob.
+    """
+    documented = os.path.join(build_dir, CONFIG_PATH)
+    if os.path.exists(documented):
+        return documented
+
+    matches = sorted(glob.glob(os.path.join(build_dir, "*", CONFIG_TAIL)))
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise CheckError(
+            "no application image .config under {} -- did the build run?".format(
+                build_dir))
+    raise CheckError(
+        "cannot tell which image is the application; found {}".format(
+            ", ".join(matches)))
 
 
 def find_partitions_yml(build_dir):
@@ -137,7 +169,7 @@ def check_target(name, spec, build_dir):
         results.append((check_id, description, symbol not in values,
                         _describe(values, symbol)))
 
-    values = load_config(os.path.join(build_dir, CONFIG_PATH))
+    values = load_config(find_app_config(build_dir))
 
     # A7 -- flash offset. An unset symbol means the default, 0.
     raw_offset = values.get("CONFIG_FLASH_LOAD_OFFSET", "0")

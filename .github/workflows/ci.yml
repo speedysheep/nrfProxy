@@ -65,9 +65,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          path: app
+          path: nrfProxy
 
-      - uses: ./app/.github/actions/setup-ncs
+      - uses: ./nrfProxy/.github/actions/setup-ncs
         with:
           ncs-rev: ${{ env.NCS_REV }}
 
@@ -75,18 +75,18 @@ jobs:
       # runs the same command a developer does rather than a second copy of the
       # board/flag table.
       - name: Build
-        run: ./app/build.sh "${{ matrix.target }}" --ncs "$GITHUB_WORKSPACE/ncs" --proj "$GITHUB_WORKSPACE/app"
+        run: ./nrfProxy/build.sh "${{ matrix.target }}" --ncs "$GITHUB_WORKSPACE/ncs" --proj "$GITHUB_WORKSPACE/nrfProxy"
 
       - name: Assert config invariants
-        run: python3 app/scripts/check_configs.py "${{ matrix.target }}" --proj app
+        run: python3 nrfProxy/scripts/check_configs.py "${{ matrix.target }}" --proj nrfProxy
 
       - name: Upload the flashable image
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}-image
           path: |
-            app/build_*/nrfProxy/zephyr/zephyr.hex
-            app/build_*/nrfProxy/zephyr/zephyr.uf2
+            nrfProxy/build_*/nrfProxy/zephyr/zephyr.hex
+            nrfProxy/build_*/nrfProxy/zephyr/zephyr.uf2
           if-no-files-found: error
           retention-days: 14
 
@@ -98,17 +98,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          path: app
+          path: nrfProxy
 
-      - uses: ./app/.github/actions/setup-ncs
+      - uses: ./nrfProxy/.github/actions/setup-ncs
         with:
           ncs-rev: ${{ env.NCS_REV }}
+
+      # native_sim builds its runner (native_simulator) with a Makefile, and the
+      # toolchain image ships cmake and ninja but no make.
+      - name: Install make
+        run: apt-get update -qq && apt-get install -y -qq make
 
       # native_sim is Linux-only, which is why these run here rather than next to
       # build.ps1 on the Windows dev box (README "Testing" says so too).
       - name: Run the proxy_core suites
         working-directory: ncs
-        run: west twister -T "$GITHUB_WORKSPACE/app/tests/unit" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
+        run: west twister -T "$GITHUB_WORKSPACE/nrfProxy/tests/unit" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
 
       - name: Upload the test report
         if: always()
@@ -127,17 +132,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          path: app
+          path: nrfProxy
 
-      - uses: ./app/.github/actions/setup-ncs
+      - uses: ./nrfProxy/.github/actions/setup-ncs
         with:
           ncs-rev: ${{ env.NCS_REV }}
+
+      - name: Install make
+        run: apt-get update -qq && apt-get install -y -qq make
 
       # Drives the real src/uart_bridge.c against an emulated UART: the ISR ->
       # ring -> consumer path, TX chaining, and the consumer-side drain.
       - name: Run the uart_bridge suite
         working-directory: ncs
-        run: west twister -T "$GITHUB_WORKSPACE/app/tests/integration" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
+        run: west twister -T "$GITHUB_WORKSPACE/nrfProxy/tests/integration" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
 
       - name: Upload the test report
         if: always()

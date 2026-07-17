@@ -2,10 +2,12 @@ name: Set up an nRF Connect SDK workspace
 description: >
   Materialise an NCS west workspace at $GITHUB_WORKSPACE/ncs, mirroring the local
   build flow (west build runs from inside the workspace with the app dir as the
-  source dir). The caller checks this repo out at $GITHUB_WORKSPACE/app first --
-  deliberately a sibling of the workspace, never nested inside it: west resolves
-  its topdir by walking up from the cwd, so a nested app would be read as part of
-  the workspace manifest.
+  source dir). The caller checks this repo out at $GITHUB_WORKSPACE/nrfProxy
+  first -- deliberately a sibling of the workspace, never nested inside it: west
+  resolves its topdir by walking up from the cwd, so a nested app would be read
+  as part of the workspace manifest. The checkout directory name matters: sysbuild
+  names the image directory after it, so checking out as "app" would put the
+  artifacts in build_*/app/ instead of the documented build_*/nrfProxy/.
 
 inputs:
   ncs-rev:
