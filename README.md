@@ -67,6 +67,12 @@ configuration.
 |------|---------|----------------------|-----------|----------------------|
 | NCS toolchain dir (e.g. `…/toolchains/936afb6332`) | Windows: `C:\ncs\toolchains\936afb6332`; Bash: unset (uses an already-activated env) | `-Toolchain` | `--toolchain` | `NRFPROXY_TOOLCHAIN` |
 | NCS workspace (the `vX.Y.Z` dir) | `C:\ncs\v3.3.1` / `~/ncs/v3.3.1` | `-Ncs` | `--ncs` | `NRFPROXY_NCS` |
+
+The defaults are just the *standard* install paths — the SDK does not have to live on C:, and
+putting it elsewhere needs no change to these scripts (set `NRFPROXY_NCS` /
+`NRFPROXY_TOOLCHAIN` once and `.\build.ps1` works unqualified). See
+[`CLAUDE.md`](CLAUDE.md) for installing to another drive, and for the two Windows traps that
+come with it: cross-drive `west build` and the 260-character path limit.
 | This project | the script's own directory | `-Proj` | `--proj` | `NRFPROXY_PROJ` |
 
 ```powershell
