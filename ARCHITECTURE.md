@@ -39,7 +39,8 @@ generic clients (nRF Connect / nRF Toolbox) work for debugging.
 
 | Path | Role |
 |------|------|
-| `src/main.c` | The entire application (~1080 lines): UART async driver glue, BLE/NUS, bridge logic, LEDs, pairing lock, identity. |
+| `src/main.c` | The application's Zephyr/BLE glue: UART async driver, BLE/NUS, bridge orchestration, LEDs, pairing lock, identity application. |
+| `src/proxy_core.{c,h}` | The pure logic `main.c` decides with: interception hooks, identity derivation, advertising/forwarding predicates, NUS chunk sizing and send-error policy. No Zephyr dependency, by rule — that is what makes it unit-testable. |
 | `prj.conf` | Shared Kconfig: BLE peripheral + NUS, pairing/bond persistence, MTU/DLE throughput, async UART. |
 | `prod.conf` | Production fragment (opt-in via `EXTRA_CONF_FILE`): drops `CONFIG_LOG` and the USB CDC-ACM console. Must never strip the pairing-lock configs (`BT_SMP`/`BT_SETTINGS`/`NVS`). |
 | `boards/<target>.overlay` | Per-board devicetree: enables UART1 + pins, LED role aliases, bond-reset button, DC/DC. Filename = full normalized board target (incl. variant, e.g. `_uf2`). |
@@ -58,11 +59,11 @@ state:
 
 | Context | Priority class | Runs |
 |---------|----------------|------|
-| UART1 ISR (`uart_cb`) | interrupt | RX chunk intake → `on_uart_rx` hook → RX ring put; TX-done chaining (`uart_tx_kick`); RX buffer slab management. |
+| UART1 ISR (`uart_cb`) | interrupt | RX chunk intake → **raw** RX ring put; TX-done chaining (`uart_tx_kick`); RX buffer slab management. Deliberately no hook: it runs in `ble_write_thread`. |
 | BT RX thread (NCS host) | cooperative (negative) | `nus_received` → `on_ble_rx` hook → TX ring put → `uart_tx_kick`. |
 | BT host threads | cooperative | Connection callbacks: `on_connected`, `on_disconnected`, `on_recycled`, `on_security_changed`, pairing callbacks. |
 | System workqueue | preemptible | Delayed works: `adv_slow_work`, `adv_retry_work`, `adv_blink_work`, `security_timeout_work`. |
-| `ble_write_thread` | preemptible, prio 7 | Drains RX ring → `bt_nus_send` chunks sized to ATT MTU − 3. Deliberately below the BT stack threads so pushing data can't starve the stack delivering it. |
+| `ble_write_thread` | preemptible, prio 7 | Drains RX ring → `on_uart_rx` hook → `bt_nus_send` in slices of ATT MTU − 3. Deliberately below the BT stack threads so pushing data can't starve the stack delivering it. |
 | `main()` | — | One-shot init, then returns (the app lives on in the above). |
 
 ### Synchronization model (the rules, as implemented)
@@ -92,17 +93,24 @@ state:
 
 ```
 UART1 RX (async, double-buffered from uart_rx_slab: 4 × 64 B)
-  └─ ISR: UART_RX_RDY ─ on_uart_rx() hook ─► uart_rx_ringbuf (2048 B) ─ k_sem_give
-       └─ ble_write_thread: claim ≤ (ATT MTU − 3) ─► bt_nus_send() ─► phone
+  └─ ISR: UART_RX_RDY ─ raw ─► uart_rx_ringbuf (2048 B) ─ k_sem_give
+       └─ ble_write_thread: claim ≤ (ATT MTU − 3) ─ on_uart_rx() hook ─ rx_finish(claimed)
+            └─ bt_nus_send() × ceil(out_len / (ATT MTU − 3)) ─► phone
 ```
 
 - Sizing rationale (from the code comments): 4 slab buffers because the driver holds
   two (double-buffering) and release can lag the replacement request; 2048 B ring ≈
   180 ms of sustained 115200 — rides out BLE buffer shortages without letting stale
   data build a delay.
-- Flow control: `bt_nus_send` returning `-ENOMEM`/`-EAGAIN` keeps the claimed data and
-  retries after 10 ms; any other error (not subscribed, disconnected) drops the chunk.
-  No connection or unencrypted link → the ring is drained and discarded.
+- The hook runs **in the consumer thread**, after the claim. Two consequences fall out
+  of that and are the subtle part of this path: the hook sees the *ring's* chunk
+  boundaries rather than the UART's (never guaranteed anyway), and because it may grow
+  the data beyond one notification, the output is sent in slices.
+- Flow control: the claimed *ring* bytes are consumed as soon as the hook has run — the
+  data lives in the scratch buffer from then on — so `bt_nus_send` returning
+  `-ENOMEM`/`-EAGAIN` retries **from that buffer** after 10 ms, never by re-claiming.
+  Any other error (not subscribed, disconnected) drops the remainder. No connection or
+  unencrypted link → the ring is drained and discarded.
 - MTU is re-read every chunk (`bt_gatt_get_mtu`), fallback 20 B; the peripheral never
   initiates MTU exchange — a central stuck at 23 B may be outrun by sustained 115200
   (known, accepted: `TODO.md` I1).
@@ -127,12 +135,13 @@ NUS RX write (BT RX thread)
 
 ### Interception hooks
 
-`on_uart_rx` / `on_ble_rx` are copy-through stubs: `in` → `out` (separate scratch,
-`PROC_BUF_SIZE` = 512), return the output length, 0 = drop, may grow. They see
-**transport chunks** (whatever DMA/one GATT write delivered), not framed messages.
-⚠ `on_uart_rx` runs in **ISR context** — acceptable for a memcpy stub, wrong for real
-filter logic; moving it into `ble_write_thread` is planned
-(`TODO_ARCHITECTURE.md` Task 6a) and is a prerequisite for meaningful hook development.
+`on_uart_rx` / `on_ble_rx` (in `proxy_core.c`) are copy-through stubs: `in` → `out`
+(separate scratch, `PROC_BUF_SIZE` = 512), return the output length, 0 = drop, may grow.
+They see **transport chunks** — one GATT write, or one ring claim — not framed messages.
+Both run in **thread context** (`ble_write_thread` and the BT RX thread), so real
+filter/framing logic belongs here. `on_uart_rx` ran in the UART ISR until
+`TODO_ARCHITECTURE.md` Task 6a moved it, which was the prerequisite for meaningful hook
+development.
 
 ## 5. BLE lifecycle state machine
 

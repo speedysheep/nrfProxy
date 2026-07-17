@@ -22,7 +22,19 @@ apps.
 
 ## Files
 
-- `src/main.c` — entire application (UART async driver, BLE/NUS, the bridge logic).
+- `src/main.c` — the application's Zephyr/BLE glue: UART async driver, BLE/NUS, LEDs,
+  connection lifetime, the locking.
+- `src/uart_bridge.c` / `src/uart_bridge.h` — the UART data path: the async driver glue
+  (`uart_cb`, the RX buffer slab) and both ring buffers. **No Bluetooth dependency**, so
+  it's driven against an emulated UART in `tests/integration/`. Its header carries the
+  SPSC/`irq_lock` contract — read it before touching the rings.
+- `src/proxy_core.c` / `src/proxy_core.h` — the pure logic main.c decides with:
+  the interception hooks, identity derivation, the advertising/forwarding predicates,
+  NUS chunk sizing and send-error policy. **Binding rule: no Zephyr dependency of any
+  kind** (no kernel objects, BT calls, logging, or Kconfig symbols) — that's what makes
+  it unit-testable off-target, so types cross the boundary as plain bytes and
+  milliseconds and `main.c` BUILD_ASSERTs the couplings. Unit-tested under
+  `tests/unit/`.
 - `prj.conf` — Kconfig: BLE peripheral + NUS, async UART, MTU/throughput tuning, debug flags.
 - `prod.conf` — optional **production** fragment for the XIAO (battery use): drops logging
   and the USB CDC-ACM console. Applied via `EXTRA_CONF_FILE`, *not* auto-merged — see
@@ -237,26 +249,34 @@ the same `CONFIG_UART_<n>_INTERRUPT_DRIVEN=n`. Verify with `CONFIG_UART_1_ASYNC=
 
 ## Architecture
 
-Single file, two independent data paths decoupled by ring buffers so the UART byte rate
-and BLE throughput don't have to match.
+Three files (`main.c` = Zephyr/BLE glue, `uart_bridge.c` = the UART data path,
+`proxy_core.c` = pure logic), two independent data paths decoupled by ring buffers so the
+UART byte rate and BLE throughput don't have to match.
 
 **Serial → phone:** UART1 async RX (double-buffered via `uart_rx_slab`) runs `uart_cb`
-in **ISR context**. Each `UART_RX_RDY` chunk passes through the `on_uart_rx` hook, is
-pushed to `uart_rx_ringbuf`, and signals `rx_data_ready`. `ble_write_thread` drains the
-ring buffer and sends chunks (sized to the negotiated ATT MTU − 3) via `bt_nus_send`. On
-`-ENOMEM`/`-EAGAIN` it keeps the data and backs off; otherwise consumes it. With no
-connection, buffered data is discarded (intentional — data is repetitive/safe to drop).
+in **ISR context**, which does nothing but push the **raw** bytes into
+`uart_rx_ringbuf` and signal `rx_data_ready`. `ble_write_thread` claims up to one
+notification's worth (ATT MTU − 3), runs the `on_uart_rx` hook on it, consumes the claimed
+*ring* bytes, and sends the hook's output via `bt_nus_send` — in slices, since the hook may
+grow the data past the MTU (`proxy_next_slice`). On `-ENOMEM`/`-EAGAIN` it retries **from
+the scratch buffer**, never by re-claiming (the ring bytes are already gone); any other
+error drops the remainder. With no connection, buffered data is discarded (intentional —
+data is repetitive/safe to drop).
 
 **Phone → serial:** `nus_received` (Bluetooth RX thread) passes data through the
-`on_ble_rx` hook into `uart_tx_ringbuf`, then `uart_tx_kick()`. Because `uart_tx()` allows
-only one transfer in flight, `uart_tx_kick()` stages one contiguous chunk in `uart_tx_buf`
-and the next chunk is started from the `UART_TX_DONE` event. The in-progress flag is
-guarded with `irq_lock` so kicks from thread and ISR don't double-start.
+`on_ble_rx` hook into `uart_bridge_send()`, which queues it in `uart_tx_ringbuf` and calls
+`uart_tx_kick()`. Because `uart_tx()` allows only one transfer in flight, `uart_tx_kick()`
+stages one contiguous chunk in `uart_tx_buf` and the next chunk is started from the
+`UART_TX_DONE` event. The in-progress flag is guarded with `irq_lock` so kicks from thread
+and ISR don't double-start.
 
-**Interception hooks (`on_uart_rx`, `on_ble_rx`):** the intended place to inspect/modify/
-filter data. Each copies `in`→`out` (scratch buffer, capacity `PROC_BUF_SIZE`) and returns
-the output length; return 0 to drop. They can grow the data. **`on_uart_rx` runs in ISR
-context — keep it light;** `on_ble_rx` runs in a thread.
+**Interception hooks (`on_uart_rx`, `on_ble_rx`, in `proxy_core.c`):** the intended place
+to inspect/modify/filter data. Each copies `in`→`out` (scratch buffer, capacity
+`PROC_BUF_SIZE`) and returns the output length; return 0 to drop. They can grow the data.
+**Both now run in thread context** — `on_uart_rx` in `ble_write_thread`, `on_ble_rx` in the
+BT RX thread — so filter/framing logic is fine in them. (`on_uart_rx` used to run in the
+UART ISR; it was moved deliberately. Consequence: it sees the *ring's* chunking, not the
+UART's.)
 
 **Connection lifetime:** `current_conn` is guarded by `conn_mutex`. `ble_write_thread`
 takes its own `bt_conn_ref()` under the mutex before using the connection and unrefs after,

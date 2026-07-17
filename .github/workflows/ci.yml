@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The one place the SDK version is pinned. Dependabot does not understand this
+  # dependency (there is no manifest); bump it by hand alongside CLAUDE.md.
+  NCS_REV: v3.3.1
+
+# Required, not cosmetic: inside the toolchain container GitHub otherwise resolves
+# the default shell to `sh`, and the image publishes its toolchain env through
+# BASH_ENV (=/opt/non-interactive-setup.sh), which only bash reads. Under sh the
+# env silently never loads and every step dies with "west: not found".
+defaults:
+  run:
+    shell: bash
+
+# Job graph (see ADD_TESTING_PLAN.md):
+#   lint          — shell/script linting, no SDK needed
+#   build-matrix  — the six firmware configs + config assertions   (Phase 1)
+#   unit-tests    — twister, native_sim ztest suites               (Phase 3)
+#   integration   — twister, native_sim uart_bridge suites         (Phase 4)
+# BabbleSim end-to-end tests live in a separate nightly workflow and never gate
+# this one.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # shellcheck is preinstalled on the GitHub-hosted Ubuntu images.
+      - name: shellcheck build.sh
+        run: shellcheck build.sh
+
+      - name: Check PowerShell syntax (build.ps1)
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./build.ps1).Path, [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+
+      # Tests for the config checker itself: each one breaks a single invariant
+      # in a synthetic .config and asserts the matching check goes red. No SDK
+      # needed, so they belong here rather than in the matrix.
+      - name: Test the config checker
+        run: python3 scripts/test_check_configs.py
+
+  build-matrix:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.1
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [dk, xiao, xiao_prod, promicro, promicro_prod, dongle]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: nrfProxy
+
+      - uses: ./nrfProxy/.github/actions/setup-ncs
+        with:
+          ncs-rev: ${{ env.NCS_REV }}
+
+      # build.sh is the committed source of truth for every configuration, so CI
+      # runs the same command a developer does rather than a second copy of the
+      # board/flag table.
+      - name: Build
+        run: ./nrfProxy/build.sh "${{ matrix.target }}" --ncs "$GITHUB_WORKSPACE/ncs" --proj "$GITHUB_WORKSPACE/nrfProxy"
+
+      - name: Assert config invariants
+        run: python3 nrfProxy/scripts/check_configs.py "${{ matrix.target }}" --proj nrfProxy
+
+      - name: Upload the flashable image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-image
+          path: |
+            nrfProxy/build_*/nrfProxy/zephyr/zephyr.hex
+            nrfProxy/build_*/nrfProxy/zephyr/zephyr.uf2
+          if-no-files-found: error
+          retention-days: 14
+
+  unit-tests:
+    name: unit tests (native_sim)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: nrfProxy
+
+      - uses: ./nrfProxy/.github/actions/setup-ncs
+        with:
+          ncs-rev: ${{ env.NCS_REV }}
+
+      # native_sim builds its runner (native_simulator) with a Makefile, and the
+      # toolchain image ships cmake and ninja but no make.
+      - name: Install make
+        run: apt-get update -qq && apt-get install -y -qq make
+
+      # native_sim is Linux-only, which is why these run here rather than next to
+      # build.ps1 on the Windows dev box (README "Testing" says so too).
+      - name: Run the proxy_core suites
+        working-directory: ncs
+        run: west twister -T "$GITHUB_WORKSPACE/nrfProxy/tests/unit" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
+
+      - name: Upload the test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: twister-out/twister.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  integration:
+    name: integration tests (native_sim)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: nrfProxy
+
+      - uses: ./nrfProxy/.github/actions/setup-ncs
+        with:
+          ncs-rev: ${{ env.NCS_REV }}
+
+      - name: Install make
+        run: apt-get update -qq && apt-get install -y -qq make
+
+      # Drives the real src/uart_bridge.c against an emulated UART: the ISR ->
+      # ring -> consumer path, TX chaining, and the consumer-side drain.
+      - name: Run the uart_bridge suite
+        working-directory: ncs
+        run: west twister -T "$GITHUB_WORKSPACE/nrfProxy/tests/integration" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
+
+      - name: Upload the test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-report
+          path: twister-out/twister.xml
+          if-no-files-found: warn
+          retention-days: 14

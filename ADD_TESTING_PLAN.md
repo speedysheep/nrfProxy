@@ -67,6 +67,106 @@ Decisions already made by the project owner (do not re-litigate):
 If a verification fails, implement the documented fallback and record the finding in
 this file (edit it — it's a living plan).
 
+### Findings log (filled in as the phases land)
+
+- **Item 1 — toolchain container: CONFIRMED.** `ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.1`
+  exists (tagged alongside `v3.3.1-rc1`, `v3.3.0`, …). It carries the **toolchain only**,
+  not the SDK source, so CI still has to `west init` a workspace — as the plan assumed. Its
+  Dockerfile sets `ENV BASH_ENV=/opt/non-interactive-setup.sh`, which sources
+  `/opt/toolchain-env.sh`, so the toolchain env (PATH, `ZEPHYR_SDK_INSTALL_DIR`) loads
+  automatically in GitHub Actions' non-interactive bash — no `nrfutil toolchain-manager
+  launch` wrapper needed. The `setup-ncs` composite action asserts this instead of assuming
+  it (`west --version` + a check that the `nrf` module is present).
+- **Phase 0 deviation — no `if: false` placeholder jobs.** The job graph is wired as a
+  comment block at the top of `ci.yml` and each phase appends its real job. Disabled
+  placeholder jobs would have been dead weight in the final tree; the comment serves the
+  same purpose (later phases only add a job) and keeps every commit's CI meaningful.
+- **Item 2 — Twister for the build matrix: NOT USED (deviation, Phase 1 layer 1
+  dropped).** The plan's own escape hatch applies ("the assertions matter, not the
+  harness") and the cost/benefit is one-sided here: for `build_only` scenarios Twister
+  contributes nothing the assertions don't already cover, while a repo-root
+  `testcase.yaml` would become a *third* copy of the board/flag table (after
+  `build.ps1`/`build.sh`) and bury each build under `twister-out/<platform>/`, away from
+  the `build_*/` dirs `check_configs.py` and the IDE expect. Instead the `build-matrix`
+  job fans out over the six targets and calls **`build.sh` itself**, so CI runs the
+  committed source of truth verbatim. Twister is still used where it earns its keep —
+  running the ztest suites (Phases 3/4). Note this deviation was also forced: with no
+  local SDK, a blind Twister/sysbuild/community-board bring-up could only have been
+  iterated through CI.
+- **Item 2 (second half) — `west twister`: CONFIRMED** present as a west extension command
+  (`scripts/west_commands/twister_cmd.py` in Zephyr's `west-commands.yml`), so the unit and
+  integration jobs invoke it as `west twister` rather than reaching for
+  `zephyr/scripts/twister` directly. Its sysbuild/`extra_args` behaviour never had to be
+  settled: the build matrix does not use Twister (see above), and the ztest suites are
+  plain single-image `native_sim` builds.
+- **Phase 3 found a real defect (the point of the exercise).** C6 (determinism) failed on
+  first run: `proxy_identity_derive()` NUL-terminated the name but left whatever the caller's
+  buffer previously held in the bytes *past* the terminator, so deriving into differently
+  pre-filled memory produced byte-different structs. Harmless in production today (`main.c`
+  reads it with `strlen`, and `identity` is a zeroed static), but it made the derivation only
+  *string*-deterministic when the whole point of the function is that it is reproducible —
+  and it would quietly carry stack garbage into advertising data the day someone advertises
+  the fixed-size buffer. Fixed by zeroing the whole name buffer; the contract in
+  `proxy_core.h` now says byte-deterministic. C6 asserts field-by-field rather than one
+  `memcmp` over the struct, since struct padding is written by nobody and would make a
+  whole-struct compare a layout tripwire instead of a determinism check.
+- **Item 3 — `uart_emul` async: CONFIRMED.** The emulated driver implements the async API
+  (`.callback_set`/`.tx`/`.rx_enable`/`.rx_buf_rsp` under `#ifdef CONFIG_UART_ASYNC_API`),
+  so Phase 4's **Option A** stands and the stub-uart fallback (Option B) was not needed —
+  the integration suite drives the real `uart_bridge.c`. Two things the plan didn't record:
+  `CONFIG_UART_EMUL` depends on `EMUL` (and defaults `y` once the DT node exists), and the
+  data-injection helpers (`uart_emul_put_rx_data` / `uart_emul_get_tx_data`) live in
+  `<zephyr/drivers/serial/uart_emul.h>` — *not* `<zephyr/drivers/uart_emul.h>`, which is the
+  unrelated bus-emulation header.
+- **⚠ Phase 4 coverage gaps (deliberate, and not yet verified anywhere).** The E-group as
+  written covers **E1, E2, E3, E7** plus a few neighbours (a chunk spanning several driver
+  buffers, back-to-back sends keeping order, `finish(0)` keeping data for the retry path).
+  Not covered, and why:
+  - **E4** (exactly one transfer in flight) and **E5** (`uart_tx` start failure → staged
+    chunk dropped, pipeline recovers): `uart_emul` offers no hook to fail a `uart_tx()`
+    start or to observe transfers overlapping — `uart_emul_set_errors()` injects *RX* line
+    errors. Both would need Option B's stub layer, which Option A otherwise makes
+    unnecessary. E3/back-to-back ordering covers the chaining *observably* (bytes arrive
+    whole and in order), just not the internal flag.
+  - **E6** (slab-empty → `UART_RX_DISABLED` → automatic restart): reaching it means starving
+    the 4-buffer slab, which needs the consumer to stall while the emulator keeps
+    delivering — timing-dependent enough to be a flaky test rather than a useful one. It
+    stays a review/bench item, and is coupled to Task 3 anyway (today a failed restart is
+    permanent RX death).
+  - **E8** (hook-in-thread slicing): its pure half is unit-tested in `tests/unit/policy`
+    via `proxy_next_slice` (grow-to-512 → 3 slices at 244, the empty/exact/overshoot
+    edges). The loop that calls `bt_nus_send` per slice lives in `main.c`'s
+    `ble_write_thread` and needs a BLE peer, so the rest belongs to bsim/bench.
+- **⚠ The whole E group is CI-verified only** — and unlike the unit suites it could not be
+  run against the host shim (it needs Zephyr's ring buffers, work queues and the emulated
+  driver). Its timing assumptions (a 50 ms RX idle timeout plus the emulator's work-queue
+  hop, waited out with generous settle/timeout margins) are the most likely thing to need a
+  fix on first CI run. Assertions were kept tolerant where exact behaviour is timing-bound
+  (E2 asserts "no more than capacity, surviving bytes are an intact prefix, ring still
+  works after" rather than an exact byte count).
+- **Phase 2 API deviation — `proxy_core` takes no Zephyr types at all.** The plan's
+  sketch had `bt_addr_le_t addr` in `struct proxy_identity`, `char name[CONFIG_BT_DEVICE_NAME_MAX]`,
+  and `k_timeout_t proxy_security_window(bool)`. All three would have dragged Zephyr into
+  the unit suites (BT headers, autoconf.h, the kernel timeout type) for no benefit, and the
+  plan already prefers "restructuring proxy_core to avoid it". So: the address crosses as
+  `uint8_t addr[6]`, the name buffer is `PROXY_DEVICE_NAME_MAX`, and the window is
+  `uint32_t proxy_security_window_ms(bool)`. `main.c` converts at the call site
+  (`K_MSEC(...)`, `memcpy` into `bt_addr_le_t.a.val`) and `BUILD_ASSERT`s each coupling
+  (`PROXY_ADDR_LEN == BT_ADDR_SIZE`, the name fits `CONFIG_BT_DEVICE_NAME_MAX`, the
+  per-device id fills the manufacturer AD tail). The payoff is real: the suites need no BT
+  config, and `proxy_core.c` compiles on a bare host — which is the only way anything in
+  this repo could be executed on this machine.
+- **⚠ The development machine cannot build this project.** Contrary to CLAUDE.md, this
+  checkout's host has **no NCS install** (`C:\ncs` and `D:\ncs` are both absent/empty) and
+  **no WSL distribution**. What it does have: mingw64 `gcc` 13.2, git, and a stray
+  `python3.9` at `C:\ProgramData\mingw64\mingw64\opt\bin\python3.exe` (no `pip`, stdlib
+  only — which is why `check_configs.py` and its tests are stdlib-only and 3.8-compatible).
+  Consequences, which shaped the phases below: **the six-config build matrix is CI-verified
+  only** — nothing in this repo has been compiled for an nRF52840 on this machine; and
+  `proxy_core` was deliberately designed **free of every Zephyr dependency** (see Phase 2)
+  so its logic can be compiled and exercised on the host with plain gcc, independent of
+  `native_sim`. Anything marked "CI-verified" below has not run here.
+
 ---
 
 ## Phase 0 — Repo scaffolding, Dependabot, CI skeleton  *(no firmware changes)*
@@ -371,6 +471,42 @@ follow-ups here.
 Dependencies: Phases 0–2 (Phase 4 not strictly required). Acceptance: F1+F2 green in
 the nightly workflow.
 
+### ⛔ Status: NOT IMPLEMENTED — deliberately deferred (2026-07-16)
+
+Phases 0–4 are in. Phase 5 was not attempted, and the reason is the environment finding
+above rather than the difficulty: **this machine has no NCS install, so nothing here can be
+built or run.** Every other phase had a way to earn confidence without one — the config
+checker has its own tests, `proxy_core` compiles and executes on the host, and even the
+integration suite is a small, conventional Twister app. Phase 5 has none: it needs
+BabbleSim itself built (`make everything`), a bsim overlay solving the "where does UART1
+data come from" problem, a companion central, and a runner asserting on device exit codes —
+a stack whose first working version is *found* by iterating, not written correctly blind.
+Committing ~500 lines of untestable scaffolding that has never executed would have been
+worse than nothing: it looks like coverage, gates nothing (nightly, `continue-on-error`),
+and the next person would have to debug code no one has ever run. The plan calls Phase 5 a
+stretch and requires CI to be green without it, so stopping here is within its terms.
+
+What is already settled for whoever picks it up:
+
+- **Item 4 — board target: `nrf52_bsim`** (`boards/native/nrf_bsim/nrf52_bsim.yaml`; no
+  variant suffix). Still to check in the CI workspace: whether `west list | grep bsim`
+  shows the babblesim modules after a `--narrow` update, since that is a *manifest group*
+  question and the narrow clone may omit them.
+- **Item 5 — `bt_nus_client`: CONFIRMED** in NCS v3.3.1
+  (`include/bluetooth/services/nus_client.h`: `struct bt_nus_client`,
+  `bt_nus_client_init()`, `bt_nus_client_send()`), so the central has a ready-made NUS
+  client.
+- **The hard part is F7/UART feeding, not the BLE side.** F1–F6 only need the BLE path;
+  the peripheral's data source can stay silent for them. Ship F1+F2 first (they cover the
+  two advertising field bugs — the highest-value pair), and treat the UART feeder (a
+  test-only thread behind a `CONFIG_*` flag is simpler than wiring a bsim UART backend) as
+  a separate step for F7.
+- **What Phase 5 would add over what now exists.** D6 already replays the F2/F3 orderings
+  as decision-function sequences, and states so honestly: it is a *model* of `main.c`'s
+  callbacks, so it cannot catch main.c wiring an event to the wrong callback. That gap —
+  plus the pairing lock end-to-end (F4/F5/F6) — is precisely what bsim would close, and
+  until then it stays with the manual checklist.
+
 ## Deliberately out of scope
 
 - Hardware-in-the-loop CI (user does hardware testing by hand; §Pre-ship checklist in
@@ -407,3 +543,28 @@ with the six-config verification results in the message.
    what's left.
 5. This file updated: verify-before-use findings recorded, IDs checked off, deviations
    explained.
+
+### Where it actually stands (2026-07-16, Phases 0–4 implemented)
+
+| # | Status |
+|---|--------|
+| 1 | **Done, pending first CI run.** `dependabot.yml`, and `ci.yml` with `lint` + `build-matrix` (six targets × `check_configs.py`) + `unit-tests` + `integration`. The badge is in the README; it cannot be green until this lands on `main`. |
+| 2 | **Done for the config invariants** (A7–A11, each with a test that deliberately breaks it) **and the predicates** (D1/D2/D6, plus the SPSC drain via E7). Not covered: the TX in-progress flag (E4/E5 — no `uart_emul` hook), slab-starvation recovery (E6). |
+| 3 | **Done.** `main.c` is glue (~915 lines, from ~1080 while gaining nothing); `proxy_core` (pure, 24 unit tests) and `uart_bridge` (integration-tested) carry the logic. |
+| 4 | **Not done — documented.** See the Phase 5 status section. |
+| 5 | **Done.** Findings log above; deviations (no Twister for the matrix, no Zephyr types in `proxy_core`, no placeholder CI jobs) each recorded with a reason. |
+
+**The honest headline: nothing in Phases 0–4 has been compiled for an nRF52840, and no
+`native_sim` test has run.** This machine has no NCS install (see the findings log), so the
+first CI run is the first real build. What *was* executed: the 21 `check_configs.py` tests
+and the 24 `proxy_core` unit tests (the latter by compiling the real suite sources against a
+host ztest shim with gcc — which is how the C6 determinism defect was caught and fixed).
+`main.c`, `uart_bridge.c`, the six-config matrix, and the whole E group are review-verified
+only. Expect the first CI run to need fixes; the likeliest candidates, in order: the
+integration suite's timing margins, the `west init`/cache step, and the container's
+toolchain env.
+
+**Bench test owed to the user (Phase 4b changed behaviour):** stream sustained 115200
+serial → phone and confirm no loss or reordering (this direction changed: the hook moved out
+of the ISR and sends are now sliced), then write phone → serial and confirm the bytes appear
+on UART1. Also worth a glance: the advertised name still reads `nrfProxy-XXXX`.
