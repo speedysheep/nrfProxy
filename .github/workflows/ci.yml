@@ -81,3 +81,32 @@ jobs:
             app/build_*/nrfProxy/zephyr/zephyr.uf2
           if-no-files-found: error
           retention-days: 14
+
+  unit-tests:
+    name: unit tests (native_sim)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.3.1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: app
+
+      - uses: ./app/.github/actions/setup-ncs
+        with:
+          ncs-rev: ${{ env.NCS_REV }}
+
+      # native_sim is Linux-only, which is why these run here rather than next to
+      # build.ps1 on the Windows dev box (README "Testing" says so too).
+      - name: Run the proxy_core suites
+        working-directory: ncs
+        run: west twister -T "$GITHUB_WORKSPACE/app/tests/unit" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
+
+      - name: Upload the test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: twister-out/twister.xml
+          if-no-files-found: warn
+          retention-days: 14

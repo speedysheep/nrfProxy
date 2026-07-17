@@ -93,6 +93,23 @@ this file (edit it — it's a living plan).
   running the ztest suites (Phases 3/4). Note this deviation was also forced: with no
   local SDK, a blind Twister/sysbuild/community-board bring-up could only have been
   iterated through CI.
+- **Item 2 (second half) — `west twister`: CONFIRMED** present as a west extension command
+  (`scripts/west_commands/twister_cmd.py` in Zephyr's `west-commands.yml`), so the unit and
+  integration jobs invoke it as `west twister` rather than reaching for
+  `zephyr/scripts/twister` directly. Its sysbuild/`extra_args` behaviour never had to be
+  settled: the build matrix does not use Twister (see above), and the ztest suites are
+  plain single-image `native_sim` builds.
+- **Phase 3 found a real defect (the point of the exercise).** C6 (determinism) failed on
+  first run: `proxy_identity_derive()` NUL-terminated the name but left whatever the caller's
+  buffer previously held in the bytes *past* the terminator, so deriving into differently
+  pre-filled memory produced byte-different structs. Harmless in production today (`main.c`
+  reads it with `strlen`, and `identity` is a zeroed static), but it made the derivation only
+  *string*-deterministic when the whole point of the function is that it is reproducible —
+  and it would quietly carry stack garbage into advertising data the day someone advertises
+  the fixed-size buffer. Fixed by zeroing the whole name buffer; the contract in
+  `proxy_core.h` now says byte-deterministic. C6 asserts field-by-field rather than one
+  `memcmp` over the struct, since struct padding is written by nobody and would make a
+  whole-struct compare a layout tripwire instead of a determinism check.
 - **Phase 2 API deviation — `proxy_core` takes no Zephyr types at all.** The plan's
   sketch had `bt_addr_le_t addr` in `struct proxy_identity`, `char name[CONFIG_BT_DEVICE_NAME_MAX]`,
   and `k_timeout_t proxy_security_window(bool)`. All three would have dragged Zephyr into

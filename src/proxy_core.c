@@ -43,8 +43,13 @@ void proxy_identity_derive(const char *base_name, const uint8_t *hwid,
 	if (base_len > sizeof(out->name) - 1) {
 		base_len = sizeof(out->name) - 1;
 	}
+
+	/* Zero the whole buffer, not just the terminator: it makes the
+	 * derivation byte-deterministic rather than only string-deterministic,
+	 * so the tail can't carry whatever the caller's memory happened to hold
+	 * into advertising data. */
+	memset(out->name, 0, sizeof(out->name));
 	memcpy(out->name, base_name, base_len);
-	out->name[base_len] = '\0';
 	out->addr_valid = false;
 
 	if (hwid == NULL || hwid_len < PROXY_HWID_MIN_LEN) {

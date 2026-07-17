@@ -63,8 +63,9 @@ struct proxy_identity {
 	 * bt_addr_le_t.a.val and pairs them with BT_ADDR_LE_RANDOM. Only
 	 * meaningful when addr_valid. */
 	uint8_t addr[PROXY_ADDR_LEN];
-	/* Advertised name, always NUL-terminated ("nrfProxy-3F7A", or the base
-	 * name alone when there is no hardware ID). */
+	/* Advertised name ("nrfProxy-3F7A", or the base name alone when there is
+	 * no hardware ID). Always NUL-terminated, and zero-padded to the full
+	 * buffer so the derivation is byte-deterministic. */
 	char name[PROXY_DEVICE_NAME_MAX];
 	/* Per-device id for the manufacturer AD field. Left untouched when
 	 * there is no hardware ID to derive it from. */
