@@ -14,6 +14,14 @@ env:
   # dependency (there is no manifest); bump it by hand alongside CLAUDE.md.
   NCS_REV: v3.3.1
 
+# Required, not cosmetic: inside the toolchain container GitHub otherwise resolves
+# the default shell to `sh`, and the image publishes its toolchain env through
+# BASH_ENV (=/opt/non-interactive-setup.sh), which only bash reads. Under sh the
+# env silently never loads and every step dies with "west: not found".
+defaults:
+  run:
+    shell: bash
+
 # Job graph (see ADD_TESTING_PLAN.md):
 #   lint          — shell/script linting, no SDK needed
 #   build-matrix  — the six firmware configs + config assertions   (Phase 1)
