@@ -71,6 +71,13 @@ $env:PYTHONPATH = "$tc\opt\bin;$tc\opt\bin\Lib;$tc\opt\bin\Lib\site-packages"
 $env:NRFUTIL_HOME = "$tc\nrfutil\home"
 $env:ZEPHYR_TOOLCHAIN_VARIANT = "zephyr"
 $env:ZEPHYR_SDK_INSTALL_DIR = "$tc\opt\zephyr-sdk"
+# How west finds the workspace (and the 'nrf' module) without us having to cd
+# into it -- which matters when the SDK and the project are on different drives:
+# west build calls os.path.relpath(source_dir) against the cwd, and that raises
+# "path is on mount 'C:', start on mount 'D:'" on Windows. So we run from $proj
+# and let ZEPHYR_BASE point at the workspace. See CLAUDE.md ("SDK on another
+# drive").
+$env:ZEPHYR_BASE = "$ncs\zephyr"
 
 # --- build configuration table -----------------------------------------------
 # key => @{ board; dir; cmake (args after --) }
@@ -93,11 +100,13 @@ function Invoke-BuildConfig([string]$name) {
   $buildDir = Join-Path $proj $c.dir
   Write-Host "==> Building '$name' : $($c.board) -> $($c.dir)" -ForegroundColor Cyan
 
-  # west build must run from inside the NCS workspace so the 'nrf' module is in scope.
+  # Run from $proj, not the workspace: ZEPHYR_BASE (set above) is what puts the
+  # 'nrf' module in scope, and keeping the cwd on the project's own drive is what
+  # lets the SDK live on another one.
   # Source dir ($proj) before '--'; sysbuild/CMake args after it.
   $westArgs = @('build','-b',$c.board,'--pristine','-d',$buildDir,$proj)
   if ($c.cmake.Count) { $westArgs += @('--') + $c.cmake }
-  Push-Location $ncs
+  Push-Location $proj
   try {
     west @westArgs
     if ($LASTEXITCODE -ne 0) { throw "west build failed for '$name' (exit $LASTEXITCODE)" }
