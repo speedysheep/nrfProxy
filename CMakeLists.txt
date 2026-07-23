@@ -3,4 +3,4 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(nrfProxy)
 
-target_sources(app PRIVATE src/main.c src/uart_rx_retry.c)
+target_sources(app PRIVATE src/main.c src/uart_rx_retry.c src/drop_stats.c)

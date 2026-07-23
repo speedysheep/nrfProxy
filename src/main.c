@@ -21,6 +21,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/sys/ring_buffer.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/logging/log.h>
 
@@ -33,6 +34,7 @@
 
 #include "security_timeout.h"
 #include "uart_rx_retry.h"
+#include "drop_stats.h"
 
 LOG_MODULE_REGISTER(nrf_proxy, LOG_LEVEL_INF);
 
@@ -68,6 +70,14 @@ K_SEM_DEFINE(rx_data_ready, 0, 1);
 RING_BUF_DECLARE(uart_tx_ringbuf, 2048);
 static uint8_t uart_tx_buf[UART_BUF_SIZE];
 static bool uart_tx_in_progress;
+static size_t uart_tx_len; /* bytes of the in-flight uart_tx() transfer */
+
+/* ISR-safe drop counters — reported periodically from ble_write_thread. */
+static atomic_t drops_uart_rx_ring;
+static atomic_t drops_uart_tx;
+static atomic_t last_uart_tx_err; /* latched; 0 means none / cleared after report */
+
+#define DROP_REPORT_INTERVAL_MS 10000U
 
 /* --- Interception hooks --------------------------------------------------- */
 /*
@@ -802,15 +812,20 @@ static void uart_tx_kick(void)
 	}
 
 	uart_tx_in_progress = true;
+	uart_tx_len = len;
 	irq_unlock(key);
 
-	if (uart_tx(uart_dev, uart_tx_buf, len, SYS_FOREVER_US) != 0) {
+	int tx_err = uart_tx(uart_dev, uart_tx_buf, len, SYS_FOREVER_US);
+	if (tx_err != 0) {
 		/* The staged chunk is deliberately dropped rather than re-queued:
 		 * a failing uart_tx() here means the driver is in a state where
 		 * retrying inline would likely fail too, and this stream is
 		 * repetitive/loss-tolerant by design. Clearing the flag lets the
 		 * next NUS write (or TX_DONE) kick the pipeline back to life. */
+		atomic_add(&drops_uart_tx, (atomic_val_t)len);
+		atomic_set(&last_uart_tx_err, tx_err);
 		uart_tx_in_progress = false;
+		uart_tx_len = 0;
 	}
 }
 
@@ -870,11 +885,25 @@ static void uart_cb(const struct device *dev, struct uart_event *evt,
 
 	switch (evt->type) {
 	case UART_TX_DONE:
-	case UART_TX_ABORTED:
-		/* Current chunk finished; send the next one if queued. */
 		uart_tx_in_progress = false;
+		uart_tx_len = 0;
 		uart_tx_kick();
 		break;
+
+	case UART_TX_ABORTED: {
+		/* evt->data.tx.len = bytes actually sent before abort; remainder
+		 * was never transmitted but we already consumed it from the ring. */
+		size_t sent = evt->data.tx.len;
+		size_t aborted = (uart_tx_len > sent) ? (uart_tx_len - sent) : 0;
+
+		if (aborted > 0) {
+			atomic_add(&drops_uart_tx, (atomic_val_t)aborted);
+		}
+		uart_tx_in_progress = false;
+		uart_tx_len = 0;
+		uart_tx_kick();
+		break;
+	}
 
 	case UART_RX_RDY: {
 		/* Pass the freshly received bytes through the interception hook,
@@ -886,7 +915,14 @@ static void uart_cb(const struct device *dev, struct uart_event *evt,
 					    evt->data.rx.len, proc_buf,
 					    sizeof(proc_buf));
 		if (out_len > 0) {
-			ring_buf_put(&uart_rx_ringbuf, proc_buf, out_len);
+			uint32_t queued = ring_buf_put(&uart_rx_ringbuf, proc_buf,
+						       out_len);
+			uint32_t dropped = drop_stats_rx_overflow(out_len, queued);
+
+			if (dropped > 0) {
+				atomic_add(&drops_uart_rx_ring,
+					   (atomic_val_t)dropped);
+			}
 			k_sem_give(&rx_data_ready);
 		}
 		break;
@@ -988,6 +1024,9 @@ static void ble_write_thread(void)
 	uint32_t claimed;
 	uint16_t max_send;
 	int err;
+	uint32_t last_rx = 0;
+	uint32_t last_tx = 0;
+	uint32_t last_report_ms = 0;
 
 	for (;;) {
 		k_sem_take(&rx_data_ready, K_FOREVER);
@@ -1007,7 +1046,8 @@ static void ble_write_thread(void)
 			if (!conn) {
 				/* Nobody listening, or link not yet encrypted:
 				 * discard buffered data. security_changed wakes
-				 * us again once the link secures. */
+				 * us again once the link secures. Intentional —
+				 * not counted as a drop (put-side overflow is). */
 				uart_rx_ringbuf_drain();
 				break;
 			}
@@ -1041,6 +1081,27 @@ static void ble_write_thread(void)
 			}
 
 			bt_conn_unref(conn);
+		}
+
+		/* Periodic drop report (thread context only — never from ISR). */
+		{
+			uint32_t rx = (uint32_t)atomic_get(&drops_uart_rx_ring);
+			uint32_t tx = (uint32_t)atomic_get(&drops_uart_tx);
+			bool changed = (rx != last_rx) || (tx != last_tx);
+			uint32_t now = k_uptime_get_32();
+
+			if (drop_stats_should_report(now, last_report_ms,
+						     DROP_REPORT_INTERVAL_MS,
+						     changed)) {
+				int tx_err = (int)atomic_get(&last_uart_tx_err);
+
+				LOG_WRN("drops: uart_rx_ring=%u uart_tx=%u "
+					"last_uart_tx_err=%d",
+					rx, tx, tx_err);
+				last_rx = rx;
+				last_tx = tx;
+				last_report_ms = now;
+			}
 		}
 	}
 }
