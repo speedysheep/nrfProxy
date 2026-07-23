@@ -50,9 +50,9 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
 ### L3. LED state machine has benign races and a cosmetic blink quirk
 - `set_status_leds()` / `current_status` are touched from main, BT host thread, and the
   system workqueue with no synchronization; interleaved calls could briefly light two LEDs.
-- `adv_blink_handler`'s `static bool on` (`src/main.c:129`) carries over between advertising
-  sessions, so the first blink after re-entering advertising can start with an off-gap.
-- Cosmetic only; fold into any future LED rework.
+  (Still cosmetic; fold into any future LED rework.)
+- ✅ FIXED (cosmetic part): `adv_blink_on` is file-scope and cleared when entering
+  `STATUS_ADVERTISING`, so re-entry no longer starts with a leftover off-gap.
 
 ### L4. README nits
 - ✅ FIXED: "Per-board Kconfig fragments" table labeled the XIAO and Pro Micro rows "(USB DFU)"

@@ -44,10 +44,10 @@ test scaffold; 6 is a refactor to do *before* hook logic lands; 7–8 are cleanu
 - ✅ **Task 4** — done. Drop counters for RX ring overflow / uart_tx fail /
   TX_ABORTED remainder; periodic `LOG_WRN` from `ble_write_thread`. Host tests
   for `drop_stats`. NCS compile-verify deferred.
-- ✅ **Task 7 item 5** — done (docs only). README intro reordered; debug-vs-production
-  wording disambiguated. The rest of Task 7 (items 1–4) edits `src/main.c` and is still
-  pending.
-- ⛔ **Tasks 5, 6, and Task 7 items 1–4** — still outstanding (separate branches).
+- ✅ **Task 7** — done (items 1–5). `bt_set_name` after `settings_load`;
+  `locked_mode` mutex-exemption comment; TX-ring disconnect asymmetry comment;
+  `adv_blink_on` reset on advertising entry; README item 5 was already done.
+- ⛔ **Tasks 5 and 6** — still outstanding (separate branches).
 - **Task 8** — reference checklist; no code action by design (deferred).
 
 ---
