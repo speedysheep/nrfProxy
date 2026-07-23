@@ -172,3 +172,20 @@ Zephyr auto-merges on top of `prj.conf`:
 
 For a logging-free **production** build on the XIAO (or Pro Micro), layer
 [`prod.conf`](prod.conf) on top via `EXTRA_CONF_FILE` — the `xiao_prod` / `promicro_prod` wrapper targets do this for you.
+
+## Testing
+
+[![CI](https://github.com/OWNER/nrfProxy/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/nrfProxy/actions/workflows/ci.yml)
+
+*(Replace `OWNER` with the GitHub org/user once the remote is set.)*
+
+- **Config regression** (no NCS required for the checker itself): after a local
+  `.\build.ps1 <target>`, run
+  `python scripts/check_configs.py <target> build_<dir>` — asserts flash offsets,
+  `CONFIG_UART_1_ASYNC`, pairing Kconfig, prod-strip invariants, and no
+  `partitions.yml`. Self-test: `python scripts/check_configs.py --self-test`.
+- **Host unit checks** (gcc): `powershell -File tests/host/run.ps1`.
+- **Twister build-only matrix**: repo-root [`testcase.yaml`](testcase.yaml) — run from
+  an NCS workspace once the toolchain is available (`west twister -T <this-repo> …`).
+- Broader plan (CI container, `proxy_core` ztests, BabbleSim): [`ADD_TESTING_PLAN.md`](ADD_TESTING_PLAN.md).
+  Unit tests on `native_sim` are intended for CI/WSL, not bare Windows.

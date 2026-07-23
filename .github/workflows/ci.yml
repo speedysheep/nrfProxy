@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NCS_REV: v3.3.1
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck build.sh
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck build.sh
+      - name: check_configs self-test
+        run: python3 scripts/check_configs.py --self-test
+
+  # Full west builds need the NCS toolchain container + workspace (see
+  # ADD_TESTING_PLAN.md Phase 1). Enabled once the image/tag is confirmed in CI.
+  build-matrix:
+    if: false
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [dk, xiao, xiao_prod, promicro, promicro_prod, dongle]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Placeholder
+        run: echo "Wire west build + scripts/check_configs.py when NCS container is verified"
+
+  unit-tests:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Placeholder
+        run: echo "native_sim twister — ADD_TESTING_PLAN Phase 3"
+
+  integration:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Placeholder
+        run: echo "uart_bridge integration — ADD_TESTING_PLAN Phase 4"
