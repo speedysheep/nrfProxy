@@ -29,14 +29,12 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
   hardware-tested** — see `PAIRING_PLAN.md §6`. The bafflingvision app still needs the
   matching bonding/UI work in `PAIRING_PLAN.md §7`.
 
-### L1. Silent data loss points — no counters, no logs
-- `uart_rx_ringbuf` overflow: partial `ring_buf_put()` in the ISR (`src/main.c:506`) ignores
-  the return value; bytes vanish without trace. (2048 bytes ≈ 180 ms of 115200 stream — a
-  slow/backgrounded phone can overflow it while connected.)
-- `uart_tx()` start failure drops the staged chunk with no log (`src/main.c:441-443`), and
-  `UART_TX_ABORTED` treats the aborted remainder as sent (`src/main.c:489-494`).
-- Fix direction: keep drop **counters** (ISR-safe) and log them periodically from thread
-  context; log the `uart_tx()` error code once.
+### L1. Silent data loss points — no counters, no logs — ✅ FIXED
+- Was: `uart_rx_ringbuf` overflow, `uart_tx()` start failure, and `UART_TX_ABORTED`
+  remainder all dropped bytes with no trace.
+- **Fixed:** ISR-safe `atomic_t` counters + periodic `LOG_WRN` from `ble_write_thread`
+  (cumulative totals, ≥10 s apart when changed). Disconnect drain is intentional and
+  not counted. Helpers in `src/drop_stats.c` (host-tested).
 
 ### L2. Transient wrong LED / error log if a central connects exactly at the fast→slow switch — ✅ FIXED
 - Was: `adv_slow_handler()` can run in the window where the controller has already accepted a

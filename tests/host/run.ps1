@@ -28,5 +28,9 @@ Invoke-HostTest "test_uart_rx_retry" @(
     "test_uart_rx_retry.c",
     (Join-Path $src "uart_rx_retry.c")
 )
+Invoke-HostTest "test_drop_stats" @(
+    "test_drop_stats.c",
+    (Join-Path $src "drop_stats.c")
+)
 
 Write-Host "all host tests passed"
