@@ -318,13 +318,13 @@ the bond is flash-persisted and a hardware button wipes it. Full design in
   armed on connect, cancelled by `on_security_changed`) disconnects any link that
   never encrypts, so an attacker can't squat unencrypted on the single connection slot — and it
   bounds the wait for a non-app central (e.g. nRF Connect) that never initiates pairing.
-  **⚠️ The watchdog window is per-mode**: 10 s in locked mode (the bonded phone encrypts
-  automatically in a couple of seconds) but **60 s in pairing mode** — it has to cover the
-  human finding and accepting Android's pairing dialog. Disconnecting while SMP is in
-  flight aborts the procedure, which Android reports as a **"couldn't pair: incorrect
-  PIN" failure** (observed on hardware with a flat 10 s: pairing only succeeded when the
-  user tapped the dialog within 10 s of connecting). Don't shorten the pairing-mode
-  window; it has no security cost (no owner exists yet to protect).
+  **⚠️ The watchdog window is a flat 60 s** in both pairing and locked mode. Disconnecting
+  while SMP is in flight aborts the procedure, which Android reports as a **"couldn't pair:
+  incorrect PIN" failure** (observed on hardware with a flat 10 s). The window must cover a
+  human finding/accepting the dialog — including the locked-mode recovery path where the
+  owner phone "forgets" the bond in Android settings, still passes the accept list, and must
+  re-pair. Don't shorten it; long is safe because the filter accept list is the real gate
+  (strangers never get a connection object).
 - **`CONFIG_BT_MAX_PAIRED=1`** makes the stack reject a second bond; the accept list makes
   a second phone unable to even connect in locked mode.
 - **Reset button** (`bond-reset` alias, per-board — `GPIO_DT_SPEC_GET_OR`, so a board
@@ -437,8 +437,8 @@ runtime bugs above (uart1 async `-ENOSYS`, USB `net_buf` pool) fixed and documen
 
 **Pairing lock implemented (`PAIRING_PLAN.md`, closes TODO.md M3):** bond-to-first-phone
 via SMP Just Works + `CONFIG_BT_SETTINGS` flash-persisted bond; filter-accept-list
-advertising in locked mode; app-layer encryption gate + per-mode security watchdog
-(10 s locked / 60 s pairing — see Conventions for why the pairing window must be long);
+advertising in locked mode; app-layer encryption gate + flat 60 s security watchdog
+(covers first-pair dialog and locked-mode bond-loss re-pair — see Conventions);
 per-board `bond-reset` button (hold at boot 3 s → `bt_unpair`). Compile-verified on all six
 configurations (dk/xiao/promicro/dongle + xiao_prod/promicro_prod), offsets unchanged and
 no `partitions.yml`, and `prod.conf` confirmed to keep `BT_SMP`/`BT_SETTINGS`/`NVS`.
@@ -446,7 +446,8 @@ Hardware-tested with the bafflingvision app (its `PAIRING_PLAN.md §7` changes a
 First-pair failed several ways on hardware, each fixed: the app's bond receiver needed
 `RECEIVER_EXPORTED` (Android 14+ never delivers `ACTION_BOND_STATE_CHANGED` to a
 NOT_EXPORTED receiver); the flat 10 s watchdog aborted SMP mid-dialog ("incorrect PIN"),
-fixed by the per-mode window; and finally the **peripheral-initiated SMP Security Request
+fixed by lengthening to 60 s (later collapsed to one window for both modes — see
+`TODO_ARCHITECTURE.md` Task 2); and finally the **peripheral-initiated SMP Security Request
 made Android pop two pairing dialogs** for one bond (root-caused from the
 `BluetoothBondStateMachine` trace) — fixed by **removing the firmware Security Request and
 having the app drive pairing via `createBond()`** (see the Just Works bullet in Conventions).

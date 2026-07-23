@@ -137,9 +137,9 @@ therefore start pairing itself. Once paired, the bond is stored in flash and:
 - Only the bonded phone can reconnect — the device advertises with a link-layer **filter
   accept list**, so other phones can still *see* it in a scan but their connection attempts
   are ignored.
-- Serial data flows **only after the link is encrypted**. A link that never encrypts is
-  disconnected (after ~10 s once locked; first-time pairing gets ~60 s so there's time to
-  accept the pairing dialog).
+-   Serial data flows **only after the link is encrypted**. A link that never encrypts is
+  disconnected after ~60 s (covers finding/accepting the pairing dialog — including when a
+  previously bonded phone must re-pair after forgetting the device in Android settings).
 - The bond **survives power loss** and re-pairs automatically on reconnect (no new dialog).
 
 **Factory reset (hand the device to a new phone):** hold the board's **bond-reset button

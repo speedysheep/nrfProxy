@@ -31,6 +31,8 @@
 
 #include <bluetooth/services/nus.h>
 
+#include "security_timeout.h"
+
 LOG_MODULE_REGISTER(nrf_proxy, LOG_LEVEL_INF);
 
 /* --- UART (incoming serial) ---------------------------------------------- */
@@ -549,20 +551,25 @@ static void refresh_locked_mode(void)
 		(unsigned int)bonds, bonds == 1 ? "" : "s");
 }
 
-/* If a fresh link never encrypts, drop it — otherwise an attacker could sit on
- * the single connection slot unencrypted, blocking the owner. Armed on connect,
- * cancelled once security_changed reports level 2.
+/* If a fresh link never encrypts, drop it. Armed on connect, cancelled once
+ * security_changed reports level 2.
  *
- * The window is per-mode. Locked mode: the bonded phone encrypts automatically
- * within a couple of seconds, so 10 s is already generous and keeps squatters
- * from blocking the owner for long. Pairing mode: the timeout must cover the
- * *human* finding and accepting Android's pairing dialog — disconnecting while
- * SMP is in flight aborts the procedure, which Android reports as a scary
- * "couldn't pair: incorrect PIN" failure (observed on hardware with a flat
- * 10 s). A long window is free of security cost here: with no bond stored
- * there is no owner to protect, and anyone connecting could simply pair. */
-#define SECURITY_TIMEOUT_LOCKED  K_SECONDS(10)
-#define SECURITY_TIMEOUT_PAIRING K_SECONDS(60)
+ * Why 60 s (and why not shorter in locked mode):
+ * (a) Disconnecting while SMP is in flight aborts pairing; Android then reports
+ *     a scary "couldn't pair: incorrect PIN" failure (observed on hardware with
+ *     a flat 10 s window). The window must cover a human finding and accepting
+ *     the pairing dialog.
+ * (b) Locked mode can need that dialog too: if the owner phone "forgets" the
+ *     device in Android Bluetooth settings it still passes the filter accept
+ *     list (same identity/IRK) and must re-pair into the single bond slot —
+ *     the documented no-factory-reset recovery path. A 10 s locked window
+ *     killed that mid-dialog.
+ * (c) Long is safe: with BT_LE_ADV_OPT_FILTER_CONN the accept list is the real
+ *     gate — strangers never get a connection object. The watchdog only bounds
+ *     a misbehaving *authorized* peer (or one that already holds the owner's
+ *     IRK). Collapsing pairing/locked into one window drops dead state.
+ */
+#define SECURITY_TIMEOUT K_MSEC(SECURITY_TIMEOUT_MS)
 static struct k_work_delayable security_timeout_work;
 
 /* Pairing is driven by the CENTRAL, not the peripheral: we deliberately do NOT
@@ -684,9 +691,7 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 	/* We do NOT request security here (see the security_timeout_work comment):
 	 * the central drives pairing/encryption. Just arm the watchdog so a link
 	 * that never encrypts gets dropped. */
-	k_work_reschedule(&security_timeout_work,
-			  locked_mode ? SECURITY_TIMEOUT_LOCKED
-				      : SECURITY_TIMEOUT_PAIRING);
+	k_work_reschedule(&security_timeout_work, SECURITY_TIMEOUT);
 
 	set_status_leds(STATUS_CONNECTED);
 }

@@ -183,11 +183,10 @@ Full design in `PAIRING_PLAN.md`; summary of the mechanism as built:
   the link encrypts. Defense-in-depth on top of the accept list.
 - **Security watchdog** (`security_timeout_work`): armed on connect, cancelled on
   encryption; disconnects a link that never encrypts, so nothing can squat on the
-  single connection slot. Window is per-mode: 10 s locked / 60 s pairing (the pairing
-  window must cover the human accepting Android's dialog — disconnecting mid-SMP
-  surfaces as "incorrect PIN"). ⚠ Known defect: the 10 s locked window breaks the
-  documented "phone forgot the bond, re-pair without factory reset" recovery path —
-  fix is `TODO_ARCHITECTURE.md` Task 2 (likely collapses both windows to 60 s).
+  single connection slot. Flat 60 s window in both pairing and locked mode (must cover
+  a human accepting Android's dialog — disconnecting mid-SMP surfaces as "incorrect
+  PIN"; locked mode needs the same window for bond-loss re-pair). Accept list is the
+  real gate, so long is safe.
 - **`CONFIG_BT_MAX_PAIRED=1`** — the stack rejects a second bond.
 - **Bond reset**: per-board `bond-reset` button held 3 s through boot →
   `bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY)` after `settings_load()` →

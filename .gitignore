@@ -1,2 +1,6 @@
 build*/
 HANDOVER.md
+
+tests/host/*.exe
+tests/host/*.o
+

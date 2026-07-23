@@ -6,13 +6,14 @@ phone can take ownership. This closes TODO.md M3 (unauthenticated NUS) without n
 per-unit secrets or a display.
 
 Status: **implemented and hardware-tested** (bonds to the first phone, filter-accept-list
-locked mode, app-layer encryption gate + per-mode security watchdog, per-board bond-reset
+locked mode, app-layer encryption gate + flat 60 s security watchdog, per-board bond-reset
 button). Research originally verified against NCS v3.3.1 (`C:\ncs\v3.3.1`) on 2026-07-02;
 implemented and hardware-confirmed with the bafflingvision app since. Outstanding: the §6
 checks marked below (BT-address stability across boots, RPA resolution against the accept
-list). One later change — dropping the firmware's SMP Security Request and having the app
-drive pairing via `createBond()` (see §3 step 3) — is compile-verified but **not yet
-hardware-confirmed** as a single-dialog flow.
+list, forget-and-re-pair with a slow dialog accept). One later change — dropping the
+firmware's SMP Security Request and having the app drive pairing via `createBond()`
+(see §3 step 3) — is compile-verified but **not yet hardware-confirmed** as a
+single-dialog flow.
 
 ---
 
@@ -114,11 +115,11 @@ most of all).
   own initiative. Trade-off: a non-app central must initiate pairing itself.
 - **Security watchdog**: schedule a `k_work_delayable` on connect; if
   `link_secure` is still false when it fires, `bt_conn_disconnect()`. Cancel it in
-  `security_changed` (success) and on disconnect. **Hardware finding:** the window must
-  be per-mode — ~10 s is fine in locked mode (LTK encryption is automatic), but pairing
-  mode needs ~60 s to cover the user finding/accepting Android's pairing dialog.
-  Disconnecting mid-SMP aborts the pairing, which Android surfaces as a "couldn't pair:
-  incorrect PIN" failure (observed with a flat 10 s window).
+  `security_changed` (success) and on disconnect. **Hardware finding:** a flat ~60 s
+  window (both pairing and locked mode) is required — disconnecting mid-SMP aborts
+  pairing and Android surfaces "couldn't pair: incorrect PIN" (observed with a flat
+  10 s window). Locked mode needs the same window: bond-loss recovery (§5) shows a
+  dialog too. Long is safe — the filter accept list is the real gate.
 - Gate the data paths: `nus_received` drops incoming writes and `ble_write_thread`
   skips sends while `link_secure` is false. (Without `BT_NUS_AUTHEN` the GATT perms are
   open, so this app-level gate is the actual enforcement.)
@@ -192,7 +193,11 @@ tweezer-short during power-up) does the job.
 - **Phone forgets the bond** (user removes it in Bluetooth settings) but device is
   locked: Android keeps its identity address and IRK per adapter, so the phone can still
   *connect* (accept list matches) and re-pairing overwrites the single bond slot for the
-  same peer — recovers without a factory reset. Test this.
+  same peer — recovers without a factory reset. The security watchdog is a flat 60 s in
+  locked mode too so the human dialog is not aborted mid-SMP (a prior 10 s locked window
+  made this path fail with "incorrect PIN"). Test: forget in Android BT settings →
+  reconnect from the app → take >10 s to accept the dialog → pairing succeeds and data
+  flows; also confirm a normal bonded reconnect still encrypts within a couple of seconds.
 - **Phone is factory-reset / replaced**: new identity → cannot connect at all. The
   hardware reset button is the recovery path. Document prominently in the README.
 - **Device is reset but the phone still holds the old bond**: the phone tries to encrypt
@@ -221,8 +226,13 @@ Hardware (user; suggest the DK or Dongle first for console visibility):
 4. Boot twice, confirm the BT address is stable (the `identity_init` ↔ settings
    interplay from §3 step 2).
 5. Hold reset button through boot ~3 s → bond wiped → phone B can now pair.
-6. Regression: fast→slow advertising switch, disconnect→reconnect cycle, and the
-   `recycled` paths still behave (no `-EALREADY`, no dead advertiser).
+6. Regression: fast→slow advertising switch, disconnect→reconnect cycle, the
+   createBond single-dialog flow, and the `recycled` paths still behave (no
+   `-EALREADY`, no dead advertiser).
+7. **Forget-and-re-pair (Task 2):** bond phone A → in Android Bluetooth settings
+   "forget" the device → reconnect from the app → expect ONE pairing dialog, take
+   >10 s to accept it → pairing succeeds and data flows. Also retest a normal bonded
+   reconnect (encrypts within a couple of seconds; watchdog never fires).
 
 Unit-test hooks (fold into TODO.md's test plan): the mode decision (bonds→locked),
 accept-list population, watchdog disconnect logic, and reset-button hold detection are
@@ -245,8 +255,8 @@ The nrfProxy firmware (the BLE↔UART bridge this app talks to over NUS) is gain
   filter accept list). Other phones still *see* it in scans but connect attempts time
   out.
 - NUS data is dropped by the firmware until the link is **encrypted** (security level 2).
-  The firmware disconnects any link that never encrypts (~10 s once bonded/locked; ~60 s
-  during first-time pairing so the user has time to accept the dialog).
+  The firmware disconnects any link that never encrypts (~60 s — covers the pairing
+  dialog in both first-pair and locked-mode bond-loss recovery).
 - A hardware button on the device wipes the bond (factory reset to "pairing mode").
 
 Update `transport/BleSerialLink.kt` (and related UI) to handle this. Requirements:
