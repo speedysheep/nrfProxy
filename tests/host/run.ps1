@@ -4,6 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$src = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "src"
 Set-Location $here
 
 $cc = Get-Command gcc -ErrorAction SilentlyContinue
@@ -14,7 +15,18 @@ if (-not $cc) {
     Write-Error "Need gcc or clang on PATH to build host tests"
 }
 
-& $cc.Source -O0 -Wall -Wextra -o test_security_timeout.exe test_security_timeout.c
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& .\test_security_timeout.exe
-exit $LASTEXITCODE
+function Invoke-HostTest($name, $sources) {
+    $exe = "$name.exe"
+    & $cc.Source -O0 -Wall -Wextra -o $exe @sources
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & ".\$exe"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
+Invoke-HostTest "test_security_timeout" @("test_security_timeout.c")
+Invoke-HostTest "test_uart_rx_retry" @(
+    "test_uart_rx_retry.c",
+    (Join-Path $src "uart_rx_retry.c")
+)
+
+Write-Host "all host tests passed"

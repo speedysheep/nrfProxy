@@ -32,6 +32,7 @@
 #include <bluetooth/services/nus.h>
 
 #include "security_timeout.h"
+#include "uart_rx_retry.h"
 
 LOG_MODULE_REGISTER(nrf_proxy, LOG_LEVEL_INF);
 
@@ -404,6 +405,46 @@ static struct k_work_delayable adv_slow_work;
  * enough to feel seamless, slow enough not to hammer a persistent fault. */
 #define ADV_RETRY_DELAY K_SECONDS(1)
 static struct k_work_delayable adv_retry_work;
+
+/* UART async RX can stop (slab empty at BUF_REQUEST → UART_RX_DISABLED). The
+ * DISABLED handler retries inline; if that fails, this work item keeps trying
+ * from thread context until enable succeeds. Mirror of adv_retry_work. */
+#define UART_RX_RETRY_DELAY K_MSEC(100)
+static struct k_work_delayable uart_rx_retry_work;
+static bool uart_rx_retry_warned;
+
+static void uart_rx_retry_handler(struct k_work *work)
+{
+	uint8_t *buf = NULL;
+	int err;
+
+	ARG_UNUSED(work);
+
+	if (k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT) != 0) {
+		if (uart_rx_retry_warn_once(&uart_rx_retry_warned)) {
+			LOG_WRN("UART RX restart: no slab buffer, retrying");
+		}
+		k_work_reschedule(&uart_rx_retry_work, UART_RX_RETRY_DELAY);
+		return;
+	}
+
+	err = uart_rx_enable(uart_dev, buf, UART_BUF_SIZE, UART_RX_TIMEOUT_US);
+	if (uart_rx_enable_succeeded(err)) {
+		/* -EBUSY: ISR or a prior attempt already re-enabled — drop the
+		 * spare buffer we allocated; the live path owns its own. */
+		if (err == -EBUSY) {
+			k_mem_slab_free(&uart_rx_slab, buf);
+		}
+		uart_rx_retry_clear_latch(&uart_rx_retry_warned);
+		return;
+	}
+
+	k_mem_slab_free(&uart_rx_slab, buf);
+	if (uart_rx_retry_warn_once(&uart_rx_retry_warned)) {
+		LOG_WRN("UART RX restart failed (err %d), retrying", err);
+	}
+	k_work_reschedule(&uart_rx_retry_work, UART_RX_RETRY_DELAY);
+}
 
 /* Whether an advertiser is currently live. Guarded by conn_mutex (like
  * current_conn). Needed because legacy connectable advertising pre-allocates a
@@ -870,14 +911,22 @@ static void uart_cb(const struct device *dev, struct uart_event *evt,
 		break;
 
 	case UART_RX_DISABLED:
-		/* Reception stopped (e.g. out of buffers): restart it. */
+		/* Reception stopped (e.g. out of buffers): restart it. Keep the
+		 * inline attempt; on any failure the delayed work retries from
+		 * thread context (slab/enable can fail under ISR pressure). */
 		if (k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT) == 0) {
 			err = uart_rx_enable(dev, buf, UART_BUF_SIZE,
 					     UART_RX_TIMEOUT_US);
-			if (err) {
-				k_mem_slab_free(&uart_rx_slab, buf);
+			if (uart_rx_enable_succeeded(err)) {
+				if (err == -EBUSY) {
+					k_mem_slab_free(&uart_rx_slab, buf);
+				}
+				uart_rx_retry_clear_latch(&uart_rx_retry_warned);
+				break;
 			}
+			k_mem_slab_free(&uart_rx_slab, buf);
 		}
+		k_work_reschedule(&uart_rx_retry_work, UART_RX_RETRY_DELAY);
 		break;
 
 	default:
@@ -1013,6 +1062,7 @@ int main(void)
 	leds_init();
 	k_work_init_delayable(&adv_slow_work, adv_slow_handler);
 	k_work_init_delayable(&adv_retry_work, adv_retry_handler);
+	k_work_init_delayable(&uart_rx_retry_work, uart_rx_retry_handler);
 	k_work_init_delayable(&security_timeout_work, security_timeout_handler);
 
 	/* Check the bond-reset button before bringing up BLE: held through boot,

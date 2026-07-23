@@ -12,14 +12,11 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
 
 ## Issues (ranked by severity)
 
-### M2. UART RX can stop permanently if buffer recovery fails
-- Where: `UART_RX_DISABLED` handler, `src/main.c:525-534`.
-- If `k_mem_slab_alloc()` (K_NO_WAIT, in ISR) or `uart_rx_enable()` fails at that moment,
-  reception is never re-enabled — the serial→BLE direction silently dies while everything
-  else (LEDs, BLE) looks healthy. Slab exhaustion is unlikely (4 buffers, released via
-  `UART_RX_BUF_RELEASED`) but not impossible under event-ordering edge cases.
-- Fix direction: on failure, schedule a delayed work item that retries `uart_rx_enable()`
-  until it succeeds, and log once.
+### M2. UART RX can stop permanently if buffer recovery fails — ✅ FIXED
+- Was: `UART_RX_DISABLED` gave up if `k_mem_slab_alloc()` / `uart_rx_enable()` failed
+  in the ISR, so serial→BLE died silently.
+- **Fixed:** inline restart kept; on failure `uart_rx_retry_work` retries every 100 ms
+  (`-EBUSY` = success). Policy helpers in `src/uart_rx_retry.c` (host-tested).
 
 ### M3. Unauthenticated, unencrypted NUS — ✅ ADDRESSED (pairing lock implemented)
 - Was: the NUS RX characteristic accepted writes from any connected central; no pairing,
