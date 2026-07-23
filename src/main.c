@@ -35,6 +35,7 @@
 #include "security_timeout.h"
 #include "uart_rx_retry.h"
 #include "drop_stats.h"
+#include "proxy_core.h"
 
 LOG_MODULE_REGISTER(nrf_proxy, LOG_LEVEL_INF);
 
@@ -81,37 +82,11 @@ static atomic_t last_uart_tx_err; /* latched; 0 means none / cleared after repor
 
 /* --- Interception hooks --------------------------------------------------- */
 /*
- * Called for each chunk of data as it is received, before it is forwarded on.
- * Right now they copy the input straight through, unmodified. To inspect,
- * modify, filter, or append to the data, edit the bodies: write whatever you
- * want forwarded into `out` (up to `out_size` bytes) and return how many bytes
- * you wrote. Return 0 to drop the data entirely.
- *
- * `out` is a separate scratch buffer (not the receive buffer), so you can grow
- * the data up to PROC_BUF_SIZE. Bump PROC_BUF_SIZE if you need more headroom.
+ * Implemented in proxy_core.c. Serial->phone hook runs in ble_write_thread
+ * (after ring claim), not in the UART ISR — keep heavy logic out of ISR.
+ * Chunk boundaries are claim-sized (up to MTU-3), not UART DMA idle chunks.
  */
-#define PROC_BUF_SIZE 512
-
-/* Serial -> phone: bytes received on UART1, before they go out over BLE. */
-static size_t on_uart_rx(const uint8_t *in, size_t in_len,
-			 uint8_t *out, size_t out_size)
-{
-	size_t n = MIN(in_len, out_size);
-	
-
-	memcpy(out, in, n);
-	return n;
-}
-
-/* Phone -> serial: bytes received over BLE, before they go out UART1. */
-static size_t on_ble_rx(const uint8_t *in, size_t in_len,
-			uint8_t *out, size_t out_size)
-{
-	size_t n = MIN(in_len, out_size);
-
-	memcpy(out, in, n);
-	return n;
-}
+#define PROC_BUF_SIZE PROXY_PROC_BUF_SIZE
 
 /* --- Status LEDs --------------------------------------------------------- */
 /*
@@ -340,35 +315,26 @@ static void identity_init(void)
 {
 	uint8_t hwid[8];
 	ssize_t len;
-
-	/* Default name regardless of what follows; suffix appended on success. */
-	memcpy(device_name, DEVICE_NAME, DEVICE_NAME_LEN + 1);
+	struct proxy_identity id;
 
 	len = hwinfo_get_device_id(hwid, sizeof(hwid));
-	if (len < 6) {
+	proxy_identity_derive(hwid, len, DEVICE_NAME, &id);
+
+	memcpy(device_name, id.name, sizeof(device_name));
+	device_name[sizeof(device_name) - 1] = '\0';
+
+	if (!id.addr_valid) {
 		LOG_WRN("No hardware ID (%d); using default name/address",
 			(int)len);
 		return;
 	}
 
-	/* Fixed static-random address from the low 6 bytes of the chip id.
-	 * BT_ADDR_SET_STATIC forces the two MSBs that mark it static-random. */
-	bt_addr_le_t addr = { .type = BT_ADDR_LE_RANDOM };
-
-	memcpy(addr.a.val, hwid, 6);
-	BT_ADDR_SET_STATIC(&addr.a);
-
-	int err = bt_id_create(&addr, NULL);
+	int err = bt_id_create(&id.addr, NULL);
 	if (err < 0) {
 		LOG_WRN("bt_id_create failed (%d); using random address", err);
 	}
 
-	/* Unique name suffix from the top id bytes (e.g. "nrfProxy-3F7A"). */
-	snprintf(device_name + DEVICE_NAME_LEN, sizeof("-XXXX"), "-%02X%02X",
-		 hwid[5], hwid[4]);
-
-	/* Per-device id in the manufacturer advertising data (after the tag). */
-	memcpy(&mfg_data[4], hwid, 4);
+	memcpy(&mfg_data[4], id.mfg_id, 4);
 }
 
 /* Two-phase advertising for power: advertise at the fast interval for quick
@@ -474,9 +440,14 @@ static bool adv_active;
 static void advertising_start(void)
 {
 	int err;
+	struct proxy_link_state link;
 
 	k_mutex_lock(&conn_mutex, K_FOREVER);
-	if (current_conn || adv_active) {
+	link.connected = (current_conn != NULL);
+	link.adv_active = adv_active;
+	link.link_secure = link_secure;
+	link.locked_mode = locked_mode;
+	if (!proxy_should_start_adv(&link)) {
 		/* Connected, or an advertiser is already running (recycled
 		 * fired for the object released by the fast->slow switch). */
 		k_mutex_unlock(&conn_mutex);
@@ -918,23 +889,16 @@ static void uart_cb(const struct device *dev, struct uart_event *evt,
 	}
 
 	case UART_RX_RDY: {
-		/* Pass the freshly received bytes through the interception hook,
-		 * then queue the result for BLE. This runs in ISR context, so
-		 * keep on_uart_rx() light. proc_buf is safe as static because the
-		 * UART ISR is not re-entrant. */
-		static uint8_t proc_buf[PROC_BUF_SIZE];
-		size_t out_len = on_uart_rx(evt->data.rx.buf + evt->data.rx.offset,
-					    evt->data.rx.len, proc_buf,
-					    sizeof(proc_buf));
-		if (out_len > 0) {
-			uint32_t queued = ring_buf_put(&uart_rx_ringbuf, proc_buf,
-						       out_len);
-			uint32_t dropped = drop_stats_rx_overflow(out_len, queued);
+		/* ISR: queue raw bytes only. on_uart_rx runs in ble_write_thread. */
+		const uint8_t *data = evt->data.rx.buf + evt->data.rx.offset;
+		uint32_t len = evt->data.rx.len;
+		uint32_t queued = ring_buf_put(&uart_rx_ringbuf, data, len);
+		uint32_t dropped = drop_stats_rx_overflow(len, queued);
 
-			if (dropped > 0) {
-				atomic_add(&drops_uart_rx_ring,
-					   (atomic_val_t)dropped);
-			}
+		if (dropped > 0) {
+			atomic_add(&drops_uart_rx_ring, (atomic_val_t)dropped);
+		}
+		if (queued > 0) {
 			k_sem_give(&rx_data_ready);
 		}
 		break;
@@ -1050,8 +1014,17 @@ static void ble_write_thread(void)
 			 * freed by a concurrent disconnect while we use it. Only
 			 * forward once the link is encrypted (pairing lock). */
 			k_mutex_lock(&conn_mutex, K_FOREVER);
-			if (current_conn && link_secure) {
-				conn = bt_conn_ref(current_conn);
+			{
+				struct proxy_link_state link = {
+					.connected = (current_conn != NULL),
+					.adv_active = adv_active,
+					.link_secure = link_secure,
+					.locked_mode = locked_mode,
+				};
+
+				if (proxy_may_forward(&link)) {
+					conn = bt_conn_ref(current_conn);
+				}
 			}
 			k_mutex_unlock(&conn_mutex);
 
@@ -1065,12 +1038,9 @@ static void ble_write_thread(void)
 			}
 
 			/* Notification payload is limited to ATT_MTU - 3 (opcode +
-			 * handle overhead). The MTU is re-read every chunk because
-			 * the peer can negotiate it up mid-connection. The 20-byte
-			 * fallback is the minimum ATT MTU (23) minus that overhead
-			 * — used only if the stack reports a nonsense MTU. */
-			max_send = bt_gatt_get_mtu(conn);
-			max_send = (max_send > 3) ? (max_send - 3) : 20;
+			 * handle overhead). Hook runs here (thread context) after
+			 * claiming raw ring bytes; finish consumes pre-hook length. */
+			max_send = proxy_nus_chunk_limit(bt_gatt_get_mtu(conn));
 
 			claimed = ring_buf_get_claim(&uart_rx_ringbuf, &chunk,
 						     max_send);
@@ -1079,17 +1049,33 @@ static void ble_write_thread(void)
 				break;
 			}
 
-			err = bt_nus_send(conn, chunk, claimed);
-			if (err == 0) {
-				/* Data was copied into the GATT buffer. */
+			{
+				static uint8_t proc_buf[PROC_BUF_SIZE];
+				size_t out_len = on_uart_rx(chunk, claimed, proc_buf,
+							    sizeof(proc_buf));
+				size_t sent = 0;
+
+				/* Ring bytes consumed regardless of send outcome —
+				 * -ENOMEM/-EAGAIN retries come from proc_buf. */
 				ring_buf_get_finish(&uart_rx_ringbuf, claimed);
-			} else if (err == -ENOMEM || err == -EAGAIN) {
-				/* No TX buffers right now: keep data, retry. */
-				ring_buf_get_finish(&uart_rx_ringbuf, 0);
-				k_sleep(K_MSEC(10));
-			} else {
-				/* Disconnected / not subscribed: drop chunk. */
-				ring_buf_get_finish(&uart_rx_ringbuf, claimed);
+
+				while (sent < out_len) {
+					uint16_t n = (uint16_t)MIN(out_len - sent,
+								   max_send);
+
+					err = bt_nus_send(conn, proc_buf + sent, n);
+					switch (proxy_send_result(err)) {
+					case PROXY_SEND_CONSUMED:
+						sent += n;
+						break;
+					case PROXY_SEND_RETRY:
+						k_sleep(K_MSEC(10));
+						break;
+					default:
+						sent = out_len; /* drop remainder */
+						break;
+					}
+				}
 			}
 
 			bt_conn_unref(conn);

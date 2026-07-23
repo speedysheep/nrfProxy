@@ -32,5 +32,11 @@ Invoke-HostTest "test_drop_stats" @(
     "test_drop_stats.c",
     (Join-Path $src "drop_stats.c")
 )
+# proxy_core needs -I for security_timeout.h
+& $cc.Source -O0 -Wall -Wextra "-I$src" -o test_proxy_core.exe `
+    test_proxy_core.c (Join-Path $src "proxy_core.c")
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& .\test_proxy_core.exe
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "all host tests passed"
