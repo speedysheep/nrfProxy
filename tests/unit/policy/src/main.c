@@ -77,15 +77,18 @@ ZTEST(proxy_core_policy, test_may_forward_all_combinations)
 
 /* --- D3: the security watchdog window ------------------------------------- */
 
-/* Pins the values current at implementation time. If TODO_ARCHITECTURE Task 2
- * collapses both windows to 60 s, update the two exact assertions -- but the
- * relational ones below must keep holding whatever the values become. */
-ZTEST(proxy_core_policy, test_security_window_per_mode)
+/* Pins the current values. TODO_ARCHITECTURE Task 2 collapsed the two windows
+ * into one 60 s window, so the split this test used to assert is gone -- locked
+ * mode needs the long window too, for the owner phone that forgot the bond and
+ * has to re-pair. The relational assertions below still hold, as intended. */
+ZTEST(proxy_core_policy, test_security_window_flat)
 {
-	zassert_equal(proxy_security_window_ms(true), 10000U,
-		      "locked mode: the bonded phone encrypts in a couple of seconds");
+	zassert_equal(proxy_security_window_ms(true), 60000U,
+		      "locked mode: covers re-pairing after the owner forgets the bond");
 	zassert_equal(proxy_security_window_ms(false), 60000U,
 		      "pairing mode: must cover a human accepting Android's dialog");
+	zassert_equal(proxy_security_window_ms(true), proxy_security_window_ms(false),
+		      "the two modes share one window");
 }
 
 ZTEST(proxy_core_policy, test_pairing_window_stays_long_enough)

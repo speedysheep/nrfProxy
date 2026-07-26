@@ -12,14 +12,11 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
 
 ## Issues (ranked by severity)
 
-### M2. UART RX can stop permanently if buffer recovery fails
-- Where: `UART_RX_DISABLED` handler, `src/main.c:525-534`.
-- If `k_mem_slab_alloc()` (K_NO_WAIT, in ISR) or `uart_rx_enable()` fails at that moment,
-  reception is never re-enabled — the serial→BLE direction silently dies while everything
-  else (LEDs, BLE) looks healthy. Slab exhaustion is unlikely (4 buffers, released via
-  `UART_RX_BUF_RELEASED`) but not impossible under event-ordering edge cases.
-- Fix direction: on failure, schedule a delayed work item that retries `uart_rx_enable()`
-  until it succeeds, and log once.
+### M2. UART RX can stop permanently if buffer recovery fails — ✅ FIXED
+- Was: `UART_RX_DISABLED` gave up if `k_mem_slab_alloc()` / `uart_rx_enable()` failed
+  in the ISR, so serial→BLE died silently.
+- **Fixed:** inline restart kept; on failure `uart_rx_retry_work` retries every 100 ms
+  (`-EBUSY` = success). Policy helpers in `src/uart_rx_retry.c` (host-tested).
 
 ### M3. Unauthenticated, unencrypted NUS — ✅ ADDRESSED (pairing lock implemented)
 - Was: the NUS RX characteristic accepted writes from any connected central; no pairing,
@@ -32,14 +29,12 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
   hardware-tested** — see `PAIRING_PLAN.md §6`. The bafflingvision app still needs the
   matching bonding/UI work in `PAIRING_PLAN.md §7`.
 
-### L1. Silent data loss points — no counters, no logs
-- `uart_rx_ringbuf` overflow: partial `ring_buf_put()` in the ISR (`src/main.c:506`) ignores
-  the return value; bytes vanish without trace. (2048 bytes ≈ 180 ms of 115200 stream — a
-  slow/backgrounded phone can overflow it while connected.)
-- `uart_tx()` start failure drops the staged chunk with no log (`src/main.c:441-443`), and
-  `UART_TX_ABORTED` treats the aborted remainder as sent (`src/main.c:489-494`).
-- Fix direction: keep drop **counters** (ISR-safe) and log them periodically from thread
-  context; log the `uart_tx()` error code once.
+### L1. Silent data loss points — no counters, no logs — ✅ FIXED
+- Was: `uart_rx_ringbuf` overflow, `uart_tx()` start failure, and `UART_TX_ABORTED`
+  remainder all dropped bytes with no trace.
+- **Fixed:** ISR-safe `atomic_t` counters + periodic `LOG_WRN` from `ble_write_thread`
+  (cumulative totals, ≥10 s apart when changed). Disconnect drain is intentional and
+  not counted. Helpers in `src/drop_stats.c` (host-tested).
 
 ### L2. Transient wrong LED / error log if a central connects exactly at the fast→slow switch — ✅ FIXED
 - Was: `adv_slow_handler()` can run in the window where the controller has already accepted a
@@ -55,9 +50,9 @@ gap that bites under specific conditions · **Low** = minor/cosmetic/robustness 
 ### L3. LED state machine has benign races and a cosmetic blink quirk
 - `set_status_leds()` / `current_status` are touched from main, BT host thread, and the
   system workqueue with no synchronization; interleaved calls could briefly light two LEDs.
-- `adv_blink_handler`'s `static bool on` (`src/main.c:129`) carries over between advertising
-  sessions, so the first blink after re-entering advertising can start with an off-gap.
-- Cosmetic only; fold into any future LED rework.
+  (Still cosmetic; fold into any future LED rework.)
+- ✅ FIXED (cosmetic part): `adv_blink_on` is file-scope and cleared when entering
+  `STATUS_ADVERTISING`, so re-entry no longer starts with a leftover off-gap.
 
 ### L4. README nits
 - ✅ FIXED: "Per-board Kconfig fragments" table labeled the XIAO and Pro Micro rows "(USB DFU)"

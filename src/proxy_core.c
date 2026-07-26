@@ -86,8 +86,12 @@ bool proxy_may_forward(const struct proxy_link_state *state)
 
 uint32_t proxy_security_window_ms(bool locked_mode)
 {
-	return locked_mode ? PROXY_SECURITY_WINDOW_LOCKED_MS
-			   : PROXY_SECURITY_WINDOW_PAIRING_MS;
+	/* One window for both modes now — see PROXY_SECURITY_WINDOW_MS for why
+	 * locked mode can no longer use the short one. The parameter stays so the
+	 * call site keeps reading naturally and the tests can pin that the two
+	 * modes agree. */
+	(void)locked_mode;
+	return PROXY_SECURITY_WINDOW_MS;
 }
 
 /* --- NUS send policy ------------------------------------------------------ */

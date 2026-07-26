@@ -30,21 +30,30 @@ Ground rules for whoever implements this (per CLAUDE.md conventions):
 Tasks are in recommended order. 1 and 2 are quick; 3+4 are one small feature; 5 is a
 test scaffold; 6 is a refactor to do *before* hook logic lands; 7–8 are cleanup.
 
-## Progress (2026-07-11, branch `review-followups`)
+## Progress (2026-07-23)
 
 - ✅ **Task 1** — done (docs only). `PAIRING_PLAN.md` §7 req 1 rewritten for the
-  `createBond()` flow + Android 14 `RECEIVER_EXPORTED` note; status line corrected. The
-  §5 first-bullet update is intentionally deferred to Task 2 (it depends on the watchdog
-  change).
-- ✅ **Task 7 item 5** — done (docs only). README intro reordered; debug-vs-production
-  wording disambiguated. The rest of Task 7 (items 1–4) edits `src/main.c` and is still
-  pending.
-- ⛔ **Tasks 2, 3, 4, 5, 6, and Task 7 items 1–4** — BLOCKED. The NCS v3.3.1 toolchain is
-  not installed on the machine used this session (no `C:\ncs\`, `west` not on PATH), so
-  the mandatory six-config compile verification can't be run. These were deliberately
-  **not** attempted, to avoid committing unverified firmware. Resume them once the
-  build environment is available (see the "Ground rules" build/verify block above).
-- **Task 8** — reference checklist; no code action by design.
+  `createBond()` flow + Android 14 `RECEIVER_EXPORTED` note; status line corrected.
+- ✅ **Task 2** — done. Collapsed `SECURITY_TIMEOUT_LOCKED`/`_PAIRING` into a single
+  `SECURITY_TIMEOUT` (60 s) via `src/security_timeout.h` (`SECURITY_TIMEOUT_MS`);
+  docs updated (CLAUDE/README/PAIRING_PLAN §5+§6/ARCHITECTURE); host test under
+  `tests/host/`. NCS not on this machine — firmware compile-verify deferred.
+- ✅ **Task 3** — done. `uart_rx_retry_work` retries failed `UART_RX_DISABLED`
+  restarts; `-EBUSY` treated as success; once-per-outage `LOG_WRN`. Policy in
+  `src/uart_rx_retry.c` with host tests. NCS compile-verify deferred.
+- ✅ **Task 4** — done. Drop counters for RX ring overflow / uart_tx fail /
+  TX_ABORTED remainder; periodic `LOG_WRN` from `ble_write_thread`. Host tests
+  for `drop_stats`. NCS compile-verify deferred.
+- ✅ **Task 7** — done (items 1–5). `bt_set_name` after `settings_load`;
+  `locked_mode` mutex-exemption comment; TX-ring disconnect asymmetry comment;
+  `adv_blink_on` reset on advertising entry; README item 5 was already done.
+- ✅ **Task 5** — done (ADD_TESTING_PLAN Phase 0+1 scaffolding).
+  `scripts/check_configs.py` (+ `--self-test`), repo-root `testcase.yaml`,
+  `.github/dependabot.yml`, CI skeleton (`lint` live; west jobs `if: false` until
+  NCS container verified), README Testing section. Full west matrix deferred to CI
+  with NCS present.
+- ⛔ **Task 6** — still outstanding (separate branch).
+- **Task 8** — reference checklist; no code action by design (deferred).
 
 ---
 

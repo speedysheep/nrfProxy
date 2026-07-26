@@ -123,20 +123,14 @@ bool proxy_may_forward(const struct proxy_link_state *state);
 
 /*
  * How long a fresh link may stay unencrypted before the watchdog drops it.
- * Without the watchdog an attacker could squat unencrypted on the single
- * connection slot and block the owner.
  *
- * The window is per-mode, and the pairing one must stay long. Locked: the
- * bonded phone encrypts automatically within a couple of seconds. Pairing: the
- * timeout has to cover a *human* finding and accepting Android's pairing
- * dialog, and disconnecting while SMP is in flight aborts the procedure, which
- * Android reports as a scary "couldn't pair: incorrect PIN" (observed on
- * hardware with a flat 10 s — pairing only succeeded if the user tapped within
- * 10 s of connecting). The long window costs nothing: with no bond stored there
- * is no owner to protect, and anyone connecting could simply pair.
+ * Flat 60 s for both pairing and locked mode (TODO_ARCHITECTURE Task 2):
+ * disconnecting mid-SMP aborts pairing and Android reports "incorrect PIN";
+ * locked mode needs the same window when the owner phone forgets the bond and
+ * must re-pair (still passes the accept list). Long is safe — the filter
+ * accept list is the real gate against strangers.
  */
-#define PROXY_SECURITY_WINDOW_LOCKED_MS  10000U
-#define PROXY_SECURITY_WINDOW_PAIRING_MS 60000U
+#define PROXY_SECURITY_WINDOW_MS 60000U
 
 uint32_t proxy_security_window_ms(bool locked_mode);
 

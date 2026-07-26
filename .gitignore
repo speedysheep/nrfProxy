@@ -1,5 +1,9 @@
-build*/
+﻿build*/
 HANDOVER.md
+
+# Host-side unit test binaries
+tests/host/*.exe
+tests/host/*.o
 
 # Twister output (unit/integration test runs)
 twister-out/

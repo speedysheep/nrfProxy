@@ -1,0 +1,56 @@
+# Build-only Twister scenarios for the six nrfProxy configurations.
+# Run from an NCS workspace with this repo as -T / path, e.g.:
+#   west twister -T /path/to/nrfProxy -v --integration
+# If Twister cannot resolve community boards / sysbuild cleanly, fall back to
+# build.ps1 + scripts/check_configs.py (assertions matter more than the harness).
+
+tests:
+  app.build.dk:
+    sysbuild: true
+    build_only: true
+    platform_allow:
+      - nrf52840dk/nrf52840
+    extra_args:
+      - SB_CONFIG_PARTITION_MANAGER=n
+
+  app.build.xiao:
+    sysbuild: true
+    build_only: true
+    platform_allow:
+      - xiao_ble/nrf52840
+    extra_args:
+      - SB_CONFIG_PARTITION_MANAGER=n
+
+  app.build.xiao_prod:
+    sysbuild: true
+    build_only: true
+    platform_allow:
+      - xiao_ble/nrf52840
+    extra_args:
+      - SB_CONFIG_PARTITION_MANAGER=n
+      - EXTRA_CONF_FILE=prod.conf
+
+  app.build.promicro:
+    sysbuild: true
+    build_only: true
+    platform_allow:
+      - promicro_nrf52840/nrf52840/uf2
+    extra_args:
+      - SB_CONFIG_PARTITION_MANAGER=n
+
+  app.build.promicro_prod:
+    sysbuild: true
+    build_only: true
+    platform_allow:
+      - promicro_nrf52840/nrf52840/uf2
+    extra_args:
+      - SB_CONFIG_PARTITION_MANAGER=n
+      - EXTRA_CONF_FILE=prod.conf
+
+  app.build.dongle:
+    sysbuild: true
+    build_only: true
+    platform_allow:
+      - nrf52840dongle/nrf52840
+    extra_args:
+      - SB_CONFIG_PARTITION_MANAGER=n

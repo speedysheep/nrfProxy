@@ -167,9 +167,9 @@ therefore start pairing itself. Once paired, the bond is stored in flash and:
 - Only the bonded phone can reconnect — the device advertises with a link-layer **filter
   accept list**, so other phones can still *see* it in a scan but their connection attempts
   are ignored.
-- Serial data flows **only after the link is encrypted**. A link that never encrypts is
-  disconnected (after ~10 s once locked; first-time pairing gets ~60 s so there's time to
-  accept the pairing dialog).
+-   Serial data flows **only after the link is encrypted**. A link that never encrypts is
+  disconnected after ~60 s (covers finding/accepting the pairing dialog — including when a
+  previously bonded phone must re-pair after forgetting the device in Android settings).
 - The bond **survives power loss** and re-pairs automatically on reconnect (no new dialog).
 
 **Factory reset (hand the device to a new phone):** hold the board's **bond-reset button
@@ -202,3 +202,20 @@ Zephyr auto-merges on top of `prj.conf`:
 
 For a logging-free **production** build on the XIAO (or Pro Micro), layer
 [`prod.conf`](prod.conf) on top via `EXTRA_CONF_FILE` — the `xiao_prod` / `promicro_prod` wrapper targets do this for you.
+
+## Testing
+
+[![CI](https://github.com/OWNER/nrfProxy/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/nrfProxy/actions/workflows/ci.yml)
+
+*(Replace `OWNER` with the GitHub org/user once the remote is set.)*
+
+- **Config regression** (no NCS required for the checker itself): after a local
+  `.\build.ps1 <target>`, run
+  `python scripts/check_configs.py <target> build_<dir>` — asserts flash offsets,
+  `CONFIG_UART_1_ASYNC`, pairing Kconfig, prod-strip invariants, and no
+  `partitions.yml`. Self-test: `python scripts/check_configs.py --self-test`.
+- **Host unit checks** (gcc): `powershell -File tests/host/run.ps1`.
+- **Twister build-only matrix**: repo-root [`testcase.yaml`](testcase.yaml) — run from
+  an NCS workspace once the toolchain is available (`west twister -T <this-repo> …`).
+- Broader plan (CI container, `proxy_core` ztests, BabbleSim): [`ADD_TESTING_PLAN.md`](ADD_TESTING_PLAN.md).
+  Unit tests on `native_sim` are intended for CI/WSL, not bare Windows.

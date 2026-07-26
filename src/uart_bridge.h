@@ -59,4 +59,7 @@ void uart_bridge_rx_finish(uint32_t consumed);
 /* Discard everything buffered, from the consumer side. */
 void uart_bridge_rx_drain(void);
 
+/* Periodic drop report for the consumer thread (ISR-safe counters, thread log). */
+void uart_bridge_log_drops_if_due(void);
+
 #endif /* UART_BRIDGE_H_ */

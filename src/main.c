@@ -85,21 +85,22 @@ static enum status_state current_status;
 
 static struct k_work_delayable adv_blink_work;
 static bool adv_slow_phase;  /* false = fast advertising, true = slow */
+static bool adv_blink_on;    /* phase of the advertising blink (file-scope so
+			      * set_status_leds can reset it on re-entry) */
 
 static void adv_blink_handler(struct k_work *work)
 {
 	const struct gpio_dt_spec *led = &status_leds[STATUS_ADVERTISING];
-	static bool on;
 
 	/* Stop if we've left the advertising state, or this board has no LED. */
 	if (current_status != STATUS_ADVERTISING || led->port == NULL) {
 		return;
 	}
 
-	on = !on;
-	gpio_pin_set_dt(led, on);
+	adv_blink_on = !adv_blink_on;
+	gpio_pin_set_dt(led, adv_blink_on);
 	k_work_reschedule(&adv_blink_work,
-			  on ? ADV_BLINK_ON :
+			  adv_blink_on ? ADV_BLINK_ON :
 			       (adv_slow_phase ? ADV_BLINK_OFF_SLOW : ADV_BLINK_OFF_FAST));
 }
 
@@ -137,6 +138,9 @@ static void set_status_leds(enum status_state state)
 	}
 
 	if (state == STATUS_ADVERTISING) {
+		/* Start from an ON pulse so re-entering advertising never inherits
+		 * a leftover off-gap from the previous session. */
+		adv_blink_on = false;
 		k_work_reschedule(&adv_blink_work, K_NO_WAIT);
 	} else {
 		const struct gpio_dt_spec *led = &status_leds[state];
@@ -257,7 +261,11 @@ static bool link_secure;
 
 /* True when a bond is stored: advertise with the filter accept list so only
  * the bonded phone can connect. Cleared in pairing mode (no bond) and after a
- * factory reset. Read when (re)starting advertising to pick filtered params. */
+ * factory reset. Read when (re)starting advertising to pick filtered params.
+ *
+ * Mutex exemption: read WITHOUT conn_mutex in on_connected and
+ * adv_params_fast/slow(). Safe — single-writer bool; writes happen at boot
+ * (pre-connection) or from pairing_complete while already connected. */
 static bool locked_mode;
 
 /* Not const: ad[1].data_len is set once at runtime from the resolved name. */
@@ -829,6 +837,11 @@ static void ble_write_thread(void)
 
 			bt_conn_unref(conn);
 		}
+
+		/* Periodic drop report. The counters are bumped from the UART
+		 * ISR, so the logging has to happen out here in thread context —
+		 * uart_bridge owns the counters, this thread owns the reporting. */
+		uart_bridge_log_drops_if_due();
 	}
 }
 
@@ -873,8 +886,20 @@ int main(void)
 	}
 	LOG_INF("Bluetooth initialized");
 
+	/* Log pairing outcomes and flip into locked mode after the first bond. */
+	bt_conn_auth_info_cb_register(&auth_info_cb);
+
+	/* Restore bonds from flash (required with CONFIG_BT_SETTINGS, and must
+	 * run before advertising_start so locked_mode is known). With
+	 * CONFIG_BT_DEVICE_NAME_DYNAMIC this can also restore a stored GAP
+	 * name — so bt_set_name runs after this, not before. */
+	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
+		settings_load();
+	}
+
 	/* Apply the resolved name to the GAP Device Name characteristic and the
-	 * advertising payload (both must happen after bt_enable). */
+	 * advertising payload (after settings_load so a restored name cannot
+	 * overwrite the hardware-ID-derived one). */
 	err = bt_set_name(identity.name);
 	if (err) {
 		LOG_WRN("bt_set_name failed (%d)", err);
@@ -886,15 +911,6 @@ int main(void)
 		LOG_ERR("bt_nus_init failed (%d)", err);
 		set_status_leds(STATUS_ERROR);
 		return 0;
-	}
-
-	/* Log pairing outcomes and flip into locked mode after the first bond. */
-	bt_conn_auth_info_cb_register(&auth_info_cb);
-
-	/* Restore bonds from flash (required with CONFIG_BT_SETTINGS, and must
-	 * run before advertising_start so locked_mode is known). */
-	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
-		settings_load();
 	}
 
 	/* Apply a boot-time factory reset now that bonds are loaded (there was
