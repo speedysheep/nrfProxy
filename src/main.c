@@ -11,17 +11,13 @@
  * NUS TX characteristic, and the serial bytes stream in.
  */
 
-#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
-#include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/hwinfo.h>
-#include <zephyr/sys/ring_buffer.h>
-#include <zephyr/sys/atomic.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/logging/log.h>
 
@@ -32,10 +28,8 @@
 
 #include <bluetooth/services/nus.h>
 
-#include "security_timeout.h"
-#include "uart_rx_retry.h"
-#include "drop_stats.h"
 #include "proxy_core.h"
+#include "uart_bridge.h"
 
 LOG_MODULE_REGISTER(nrf_proxy, LOG_LEVEL_INF);
 
@@ -44,49 +38,17 @@ LOG_MODULE_REGISTER(nrf_proxy, LOG_LEVEL_INF);
 #define UART_NODE         DT_NODELABEL(uart1)
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_NODE);
 
-#define UART_BUF_SIZE     64        /* size of each async RX buffer */
-#define UART_RX_TIMEOUT_US 50000U   /* flush partial data after 50 ms idle */
-
-/* Pool of RX buffers handed to the async UART driver, and a ring buffer that
- * the BLE thread drains. The ring buffer is single-producer (UART ISR) /
- * single-consumer (ble_write_thread), which is safe without extra locking.
- *
- * Sizing: 4 slab buffers because the driver holds up to two at a time
- * (double-buffering) and the release of a finished buffer can lag its
- * replacement request — 2 would deadlock the RX path on that lag, 4 gives
- * margin. The 2048-byte ring is ~180 ms of a sustained 115200 stream: enough
- * to ride out a BLE buffer shortage without dropping, small enough that stale
- * data can't build up a noticeable forwarding delay.
+/* The UART data path itself (the async driver glue and both ring buffers) lives
+ * in uart_bridge.c; this file is its only caller.
  *
  * The semaphore is binary (max 1) on purpose: it only means "there may be
- * data", and the consumer drains the ring completely per wakeup, so counting
- * every ISR chunk would add nothing. */
-K_MEM_SLAB_DEFINE(uart_rx_slab, UART_BUF_SIZE, 4, 4);
-RING_BUF_DECLARE(uart_rx_ringbuf, 2048);
+ * data", and ble_write_thread drains the ring completely per wakeup, so
+ * counting every ISR chunk would add nothing. It doubles as the "state changed,
+ * re-evaluate" wake for the disconnect flush and the security gate opening. */
 K_SEM_DEFINE(rx_data_ready, 0, 1);
 
-/* TX path: bytes received from the phone (NUS write) are queued here and fed
- * out the UART. uart_tx() can only have one transfer in flight, so we stage a
- * contiguous chunk in uart_tx_buf and start the next chunk on UART_TX_DONE. */
-RING_BUF_DECLARE(uart_tx_ringbuf, 2048);
-static uint8_t uart_tx_buf[UART_BUF_SIZE];
-static bool uart_tx_in_progress;
-static size_t uart_tx_len; /* bytes of the in-flight uart_tx() transfer */
-
-/* ISR-safe drop counters — reported periodically from ble_write_thread. */
-static atomic_t drops_uart_rx_ring;
-static atomic_t drops_uart_tx;
-static atomic_t last_uart_tx_err; /* latched; 0 means none / cleared after report */
-
-#define DROP_REPORT_INTERVAL_MS 10000U
-
-/* --- Interception hooks --------------------------------------------------- */
-/*
- * Implemented in proxy_core.c. Serial->phone hook runs in ble_write_thread
- * (after ring claim), not in the UART ISR — keep heavy logic out of ISR.
- * Chunk boundaries are claim-sized (up to MTU-3), not UART DMA idle chunks.
- */
-#define PROC_BUF_SIZE PROXY_PROC_BUF_SIZE
+/* The interception hooks (on_uart_rx / on_ble_rx) live in proxy_core.c — they
+ * are the designated extension point, and pure logic, so they are unit-tested. */
 
 /* --- Status LEDs --------------------------------------------------------- */
 /*
@@ -250,11 +212,20 @@ static bool bond_reset_requested(void)
 /* --- BLE ----------------------------------------------------------------- */
 
 #define DEVICE_NAME       CONFIG_BT_DEVICE_NAME
-#define DEVICE_NAME_LEN   (sizeof(DEVICE_NAME) - 1)
 
-/* Runtime advertised name: CONFIG_BT_DEVICE_NAME plus a "-XXXX" suffix derived
- * from the chip's hardware ID (filled in by identity_init()). */
-static char device_name[DEVICE_NAME_LEN + sizeof("-XXXX")];
+/* This unit's identity (name, address, per-device id), derived from the chip's
+ * hardware ID by identity_init(). proxy_core owns the derivation; these asserts
+ * pin the couplings it deliberately can't see, since it knows nothing of
+ * Kconfig or the BT types. */
+static struct proxy_identity identity;
+
+BUILD_ASSERT(PROXY_ADDR_LEN == BT_ADDR_SIZE,
+	     "proxy_core's address must match bt_addr_t");
+BUILD_ASSERT(sizeof(identity.name) <= CONFIG_BT_DEVICE_NAME_MAX + 1,
+	     "the derived name must fit what bt_set_name() accepts");
+BUILD_ASSERT(sizeof(DEVICE_NAME "-XXXX") <= PROXY_DEVICE_NAME_MAX,
+	     "CONFIG_BT_DEVICE_NAME is too long to carry the -XXXX suffix; "
+	     "units would be indistinguishable over the air");
 
 /* Manufacturer-specific advertising data, so a scanner can filter for *our*
  * boards without connecting. Layout on the wire:
@@ -265,12 +236,16 @@ static char device_name[DEVICE_NAME_LEN + sizeof("-XXXX")];
  */
 #define COMPANY_ID_LO 0xFF
 #define COMPANY_ID_HI 0xFF
+#define MFG_ID_OFFSET 4                /* company id (2) + magic tag (2) */
 
 static uint8_t mfg_data[] = {
 	COMPANY_ID_LO, COMPANY_ID_HI,  /* company id, little-endian */
 	'N', 'P',                      /* magic tag — what a scanner filters on */
 	0, 0, 0, 0,                    /* per-device id, set in identity_init() */
 };
+
+BUILD_ASSERT(sizeof(mfg_data) == MFG_ID_OFFSET + PROXY_MFG_ID_LEN,
+	     "the per-device id must fill the tail of the manufacturer AD");
 
 static struct bt_conn *current_conn;
 /* Guards current_conn so the writer thread can take a reference before use,
@@ -290,13 +265,13 @@ static bool link_secure;
  *
  * Mutex exemption: read WITHOUT conn_mutex in on_connected and
  * adv_params_fast/slow(). Safe — single-writer bool; writes happen at boot
- * (pre-connection) or from pairing_complete while already connected. */ 
+ * (pre-connection) or from pairing_complete while already connected. */
 static bool locked_mode;
 
 /* Not const: ad[1].data_len is set once at runtime from the resolved name. */
 static struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
-	BT_DATA(BT_DATA_NAME_COMPLETE, device_name, 0),
+	BT_DATA(BT_DATA_NAME_COMPLETE, identity.name, 0),
 	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)),
 };
 
@@ -309,32 +284,34 @@ static const struct bt_data sd[] = {
  *   - a fixed random-static BT address (constant across reboots, unlike the
  *     default which is regenerated from the RNG each boot), and
  *   - a "-XXXX" name suffix so units are tellable apart in a scanner.
+ * proxy_identity_derive() does the deriving; this applies the result.
  * bt_id_create() must run before bt_enable(); the name is applied after.
  * If the hardware ID can't be read we fall back to the compile-time defaults. */
 static void identity_init(void)
 {
 	uint8_t hwid[8];
 	ssize_t len;
-	struct proxy_identity id;
 
 	len = hwinfo_get_device_id(hwid, sizeof(hwid));
-	proxy_identity_derive(hwid, len, DEVICE_NAME, &id);
+	proxy_identity_derive(DEVICE_NAME, hwid, (int)len, &identity);
 
-	memcpy(device_name, id.name, sizeof(device_name));
-	device_name[sizeof(device_name) - 1] = '\0';
-
-	if (!id.addr_valid) {
+	if (!identity.addr_valid) {
 		LOG_WRN("No hardware ID (%d); using default name/address",
 			(int)len);
 		return;
 	}
 
-	int err = bt_id_create(&id.addr, NULL);
+	bt_addr_le_t addr = { .type = BT_ADDR_LE_RANDOM };
+
+	memcpy(addr.a.val, identity.addr, sizeof(addr.a.val));
+
+	int err = bt_id_create(&addr, NULL);
 	if (err < 0) {
 		LOG_WRN("bt_id_create failed (%d); using random address", err);
 	}
 
-	memcpy(&mfg_data[4], id.mfg_id, 4);
+	/* Per-device id in the manufacturer advertising data (after the tag). */
+	memcpy(&mfg_data[MFG_ID_OFFSET], identity.mfg_id, sizeof(identity.mfg_id));
 }
 
 /* Two-phase advertising for power: advertise at the fast interval for quick
@@ -390,46 +367,6 @@ static struct k_work_delayable adv_slow_work;
 #define ADV_RETRY_DELAY K_SECONDS(1)
 static struct k_work_delayable adv_retry_work;
 
-/* UART async RX can stop (slab empty at BUF_REQUEST → UART_RX_DISABLED). The
- * DISABLED handler retries inline; if that fails, this work item keeps trying
- * from thread context until enable succeeds. Mirror of adv_retry_work. */
-#define UART_RX_RETRY_DELAY K_MSEC(100)
-static struct k_work_delayable uart_rx_retry_work;
-static bool uart_rx_retry_warned;
-
-static void uart_rx_retry_handler(struct k_work *work)
-{
-	uint8_t *buf = NULL;
-	int err;
-
-	ARG_UNUSED(work);
-
-	if (k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT) != 0) {
-		if (uart_rx_retry_warn_once(&uart_rx_retry_warned)) {
-			LOG_WRN("UART RX restart: no slab buffer, retrying");
-		}
-		k_work_reschedule(&uart_rx_retry_work, UART_RX_RETRY_DELAY);
-		return;
-	}
-
-	err = uart_rx_enable(uart_dev, buf, UART_BUF_SIZE, UART_RX_TIMEOUT_US);
-	if (uart_rx_enable_succeeded(err)) {
-		/* -EBUSY: ISR or a prior attempt already re-enabled — drop the
-		 * spare buffer we allocated; the live path owns its own. */
-		if (err == -EBUSY) {
-			k_mem_slab_free(&uart_rx_slab, buf);
-		}
-		uart_rx_retry_clear_latch(&uart_rx_retry_warned);
-		return;
-	}
-
-	k_mem_slab_free(&uart_rx_slab, buf);
-	if (uart_rx_retry_warn_once(&uart_rx_retry_warned)) {
-		LOG_WRN("UART RX restart failed (err %d), retrying", err);
-	}
-	k_work_reschedule(&uart_rx_retry_work, UART_RX_RETRY_DELAY);
-}
-
 /* Whether an advertiser is currently live. Guarded by conn_mutex (like
  * current_conn). Needed because legacy connectable advertising pre-allocates a
  * connection object, so bt_le_adv_stop() — e.g. during the fast->slow switch —
@@ -440,14 +377,14 @@ static bool adv_active;
 static void advertising_start(void)
 {
 	int err;
-	struct proxy_link_state link;
 
 	k_mutex_lock(&conn_mutex, K_FOREVER);
-	link.connected = (current_conn != NULL);
-	link.adv_active = adv_active;
-	link.link_secure = link_secure;
-	link.locked_mode = locked_mode;
-	if (!proxy_should_start_adv(&link)) {
+	const struct proxy_link_state state = {
+		.connected = (current_conn != NULL),
+		.adv_active = adv_active,
+	};
+
+	if (!proxy_should_start_adv(&state)) {
 		/* Connected, or an advertiser is already running (recycled
 		 * fired for the object released by the fast->slow switch). */
 		k_mutex_unlock(&conn_mutex);
@@ -464,7 +401,7 @@ static void advertising_start(void)
 		k_work_reschedule(&adv_retry_work, ADV_RETRY_DELAY);
 		return;
 	}
-	LOG_INF("Advertising as \"%s\" (fast, %s)", device_name,
+	LOG_INF("Advertising as \"%s\" (fast, %s)", identity.name,
 		locked_mode ? "locked" : "pairing");
 	adv_slow_phase = false;   /* brisk LED blink during the fast phase */
 	set_status_leds(STATUS_ADVERTISING);
@@ -581,25 +518,11 @@ static void refresh_locked_mode(void)
 		(unsigned int)bonds, bonds == 1 ? "" : "s");
 }
 
-/* If a fresh link never encrypts, drop it. Armed on connect, cancelled once
- * security_changed reports level 2.
- *
- * Why 60 s (and why not shorter in locked mode):
- * (a) Disconnecting while SMP is in flight aborts pairing; Android then reports
- *     a scary "couldn't pair: incorrect PIN" failure (observed on hardware with
- *     a flat 10 s window). The window must cover a human finding and accepting
- *     the pairing dialog.
- * (b) Locked mode can need that dialog too: if the owner phone "forgets" the
- *     device in Android Bluetooth settings it still passes the filter accept
- *     list (same identity/IRK) and must re-pair into the single bond slot —
- *     the documented no-factory-reset recovery path. A 10 s locked window
- *     killed that mid-dialog.
- * (c) Long is safe: with BT_LE_ADV_OPT_FILTER_CONN the accept list is the real
- *     gate — strangers never get a connection object. The watchdog only bounds
- *     a misbehaving *authorized* peer (or one that already holds the owner's
- *     IRK). Collapsing pairing/locked into one window drops dead state.
- */
-#define SECURITY_TIMEOUT K_MSEC(SECURITY_TIMEOUT_MS)
+/* If a fresh link never encrypts, drop it — otherwise an attacker could sit on
+ * the single connection slot unencrypted, blocking the owner. Armed on connect,
+ * cancelled once security_changed reports level 2. The window is per-mode;
+ * proxy_security_window_ms() picks it and documents why the pairing one must
+ * stay long. */
 static struct k_work_delayable security_timeout_work;
 
 /* Pairing is driven by the CENTRAL, not the peripheral: we deliberately do NOT
@@ -721,7 +644,8 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 	/* We do NOT request security here (see the security_timeout_work comment):
 	 * the central drives pairing/encryption. Just arm the watchdog so a link
 	 * that never encrypts gets dropped. */
-	k_work_reschedule(&security_timeout_work, SECURITY_TIMEOUT);
+	k_work_reschedule(&security_timeout_work,
+			  K_MSEC(proxy_security_window_ms(locked_mode)));
 
 	set_status_leds(STATUS_CONNECTED);
 }
@@ -741,16 +665,13 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 	k_mutex_unlock(&conn_mutex);
 
 	/* Drop anything buffered so the next client starts on a clean stream.
-	 * Don't touch the ring buffer from here: it is single-producer (UART
-	 * ISR) / single-consumer (ble_write_thread), and a ring_buf_reset()
-	 * from this (BT host) thread would race a concurrent ISR put and could
-	 * corrupt the indices. Instead wake the writer thread — it sees
-	 * current_conn == NULL and discards from the consumer side, which is
-	 * safe against the producer.
+	 * Don't drain from here: the RX ring's only consumer is ble_write_thread
+	 * (see uart_bridge.h), and flushing from this (BT host) thread would race
+	 * it. Instead wake the writer — it sees current_conn == NULL and discards
+	 * from the consumer side, which is safe against the producing ISR.
 	 *
-	 * Deliberately only the RX ring: uart_tx_ringbuf (phone→serial) is left
-	 * alone — ≤2048 B drains in ~180 ms at 115200, and resetting it from
-	 * this BT thread would violate its SPSC contract the same way. */
+	 * The TX ring is deliberately left alone: at 115200 its 2048 bytes drain
+	 * in ~180 ms, and resetting it from here would break the same rule. */
 	k_sem_give(&rx_data_ready);
 
 	/* Do NOT restart advertising here: at this point the connection object
@@ -774,43 +695,6 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.recycled = on_recycled,
 	.security_changed = on_security_changed,
 };
-
-/* Start a UART transmission if one isn't already running. Safe to call from
- * both thread context (NUS write) and ISR context (UART_TX_DONE); the
- * in-progress flag is checked under irq_lock so only one transfer starts. */
-static void uart_tx_kick(void)
-{
-	unsigned int key = irq_lock();
-
-	if (uart_tx_in_progress) {
-		irq_unlock(key);
-		return;
-	}
-
-	uint32_t len = ring_buf_get(&uart_tx_ringbuf, uart_tx_buf,
-				    sizeof(uart_tx_buf));
-	if (len == 0) {
-		irq_unlock(key);
-		return;
-	}
-
-	uart_tx_in_progress = true;
-	uart_tx_len = len;
-	irq_unlock(key);
-
-	int tx_err = uart_tx(uart_dev, uart_tx_buf, len, SYS_FOREVER_US);
-	if (tx_err != 0) {
-		/* The staged chunk is deliberately dropped rather than re-queued:
-		 * a failing uart_tx() here means the driver is in a state where
-		 * retrying inline would likely fail too, and this stream is
-		 * repetitive/loss-tolerant by design. Clearing the flag lets the
-		 * next NUS write (or TX_DONE) kick the pipeline back to life. */
-		atomic_add(&drops_uart_tx, (atomic_val_t)len);
-		atomic_set(&last_uart_tx_err, tx_err);
-		uart_tx_in_progress = false;
-		uart_tx_len = 0;
-	}
-}
 
 /* Phone -> device: data written to the NUS RX characteristic goes out UART1. */
 static void nus_received(struct bt_conn *conn, const uint8_t *const data,
@@ -837,14 +721,7 @@ static void nus_received(struct bt_conn *conn, const uint8_t *const data,
 		return;
 	}
 
-	uint32_t queued = ring_buf_put(&uart_tx_ringbuf, proc_buf, out_len);
-
-	if (queued < out_len) {
-		LOG_WRN("UART TX buffer full, dropped %u bytes",
-			(unsigned int)(out_len - queued));
-	}
-
-	uart_tx_kick();
+	uart_bridge_send(proc_buf, out_len);
 }
 
 static void nus_send_enabled(enum bt_nus_send_status status)
@@ -858,249 +735,113 @@ static struct bt_nus_cb nus_cb = {
 	.send_enabled = nus_send_enabled,
 };
 
-/* --- UART async callback (runs in ISR context) --------------------------- */
-
-static void uart_cb(const struct device *dev, struct uart_event *evt,
-		    void *user_data)
-{
-	uint8_t *buf;
-	int err;
-
-	switch (evt->type) {
-	case UART_TX_DONE:
-		uart_tx_in_progress = false;
-		uart_tx_len = 0;
-		uart_tx_kick();
-		break;
-
-	case UART_TX_ABORTED: {
-		/* evt->data.tx.len = bytes actually sent before abort; remainder
-		 * was never transmitted but we already consumed it from the ring. */
-		size_t sent = evt->data.tx.len;
-		size_t aborted = (uart_tx_len > sent) ? (uart_tx_len - sent) : 0;
-
-		if (aborted > 0) {
-			atomic_add(&drops_uart_tx, (atomic_val_t)aborted);
-		}
-		uart_tx_in_progress = false;
-		uart_tx_len = 0;
-		uart_tx_kick();
-		break;
-	}
-
-	case UART_RX_RDY: {
-		/* ISR: queue raw bytes only. on_uart_rx runs in ble_write_thread. */
-		const uint8_t *data = evt->data.rx.buf + evt->data.rx.offset;
-		uint32_t len = evt->data.rx.len;
-		uint32_t queued = ring_buf_put(&uart_rx_ringbuf, data, len);
-		uint32_t dropped = drop_stats_rx_overflow(len, queued);
-
-		if (dropped > 0) {
-			atomic_add(&drops_uart_rx_ring, (atomic_val_t)dropped);
-		}
-		if (queued > 0) {
-			k_sem_give(&rx_data_ready);
-		}
-		break;
-	}
-
-	case UART_RX_BUF_REQUEST:
-		/* Provide the next buffer for double-buffered reception. If the
-		 * slab is empty we deliberately answer with nothing: the driver
-		 * then runs out of buffers and raises UART_RX_DISABLED, whose
-		 * handler below restarts reception once a buffer is free again.
-		 * That path is the recovery mechanism — don't "fix" the silent
-		 * failure here without covering it there. */
-		if (k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT) == 0) {
-			uart_rx_buf_rsp(dev, buf, UART_BUF_SIZE);
-		}
-		break;
-
-	case UART_RX_BUF_RELEASED:
-		if (evt->data.rx_buf.buf) {
-			k_mem_slab_free(&uart_rx_slab, evt->data.rx_buf.buf);
-		}
-		break;
-
-	case UART_RX_DISABLED:
-		/* Reception stopped (e.g. out of buffers): restart it. Keep the
-		 * inline attempt; on any failure the delayed work retries from
-		 * thread context (slab/enable can fail under ISR pressure). */
-		if (k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT) == 0) {
-			err = uart_rx_enable(dev, buf, UART_BUF_SIZE,
-					     UART_RX_TIMEOUT_US);
-			if (uart_rx_enable_succeeded(err)) {
-				if (err == -EBUSY) {
-					k_mem_slab_free(&uart_rx_slab, buf);
-				}
-				uart_rx_retry_clear_latch(&uart_rx_retry_warned);
-				break;
-			}
-			k_mem_slab_free(&uart_rx_slab, buf);
-		}
-		k_work_reschedule(&uart_rx_retry_work, UART_RX_RETRY_DELAY);
-		break;
-
-	default:
-		break;
-	}
-}
-
-static int uart_init(void)
-{
-	uint8_t *buf;
-	int err;
-
-	if (!device_is_ready(uart_dev)) {
-		LOG_ERR("UART device not ready");
-		return -ENODEV;
-	}
-
-	err = uart_callback_set(uart_dev, uart_cb, NULL);
-	if (err) {
-		LOG_ERR("uart_callback_set failed (%d)", err);
-		return err;
-	}
-
-	err = k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT);
-	if (err) {
-		return err;
-	}
-
-	err = uart_rx_enable(uart_dev, buf, UART_BUF_SIZE, UART_RX_TIMEOUT_US);
-	if (err) {
-		k_mem_slab_free(&uart_rx_slab, buf);
-		return err;
-	}
-
-	return 0;
-}
-
 /* --- BLE writer thread: ring buffer -> NUS notifications ------------------ */
 
-/* Discard everything in the RX ring buffer. Must only be called from
- * ble_write_thread: the ring is single-producer (UART ISR) / single-consumer
- * (this thread), and claim/finish is a pure consumer operation, safe against a
- * concurrent ISR put. ring_buf_reset() is NOT — it rewrites both indices and
- * corrupts the buffer if the ISR produces mid-reset (this was a real latent
- * bug, hit on every disconnect while serial data streamed). */
-static void uart_rx_ringbuf_drain(void)
-{
-	uint8_t *buf;
-	uint32_t len;
+/* How long to wait out a transient BLE TX buffer shortage before re-sending the
+ * chunk we kept. Short enough that the 2048-byte RX ring (~180 ms of sustained
+ * 115200) doesn't overrun while we back off. */
+#define NUS_RETRY_DELAY_MS 10
 
-	while ((len = ring_buf_get_claim(&uart_rx_ringbuf, &buf, UINT32_MAX)) > 0) {
-		ring_buf_get_finish(&uart_rx_ringbuf, len);
+/* Send one hook output (which may be larger than a single notification) to the
+ * peer, slice by slice.
+ *
+ * The ring bytes behind this data are already consumed — it lives in proc_buf —
+ * so a transient buffer shortage must be retried from *here*, never by
+ * re-claiming from the ring. Anything that isn't transient drops the remainder:
+ * the stream is loss-tolerant, and blocking the writer would back up the ring. */
+static void send_processed(struct bt_conn *conn, const uint8_t *data,
+			   size_t out_len, uint16_t max_send)
+{
+	size_t sent = 0;
+	size_t slice;
+
+	while ((slice = proxy_next_slice(out_len, sent, max_send)) > 0) {
+		int err = bt_nus_send(conn, data + sent, slice);
+
+		switch (proxy_send_result(err)) {
+		case PROXY_SEND_CONSUMED:
+			/* Data was copied into the GATT buffer. */
+			sent += slice;
+			break;
+		case PROXY_SEND_RETRY:
+			/* No TX buffers right now: keep the data, retry. */
+			k_sleep(K_MSEC(NUS_RETRY_DELAY_MS));
+			break;
+		case PROXY_SEND_DROP:
+			/* Disconnected / not subscribed: drop what's left. */
+			return;
+		}
 	}
 }
 
 static void ble_write_thread(void)
 {
+	/* Only this thread runs the hook, so a static scratch buffer is safe and
+	 * keeps 512 bytes off the thread stack. */
+	static uint8_t proc_buf[PROC_BUF_SIZE];
 	uint8_t *chunk;
 	uint32_t claimed;
 	uint16_t max_send;
-	int err;
-	uint32_t last_rx = 0;
-	uint32_t last_tx = 0;
-	uint32_t last_report_ms = 0;
 
 	for (;;) {
 		k_sem_take(&rx_data_ready, K_FOREVER);
 
-		while (!ring_buf_is_empty(&uart_rx_ringbuf)) {
+		while (!uart_bridge_rx_is_empty()) {
 			struct bt_conn *conn = NULL;
 
 			/* Take our own reference so the connection object can't be
 			 * freed by a concurrent disconnect while we use it. Only
 			 * forward once the link is encrypted (pairing lock). */
 			k_mutex_lock(&conn_mutex, K_FOREVER);
-			{
-				struct proxy_link_state link = {
-					.connected = (current_conn != NULL),
-					.adv_active = adv_active,
-					.link_secure = link_secure,
-					.locked_mode = locked_mode,
-				};
+			const struct proxy_link_state state = {
+				.connected = (current_conn != NULL),
+				.link_secure = link_secure,
+			};
 
-				if (proxy_may_forward(&link)) {
-					conn = bt_conn_ref(current_conn);
-				}
+			if (proxy_may_forward(&state)) {
+				conn = bt_conn_ref(current_conn);
 			}
 			k_mutex_unlock(&conn_mutex);
 
 			if (!conn) {
 				/* Nobody listening, or link not yet encrypted:
 				 * discard buffered data. security_changed wakes
-				 * us again once the link secures. Intentional —
-				 * not counted as a drop (put-side overflow is). */
-				uart_rx_ringbuf_drain();
+				 * us again once the link secures. */
+				uart_bridge_rx_drain();
 				break;
 			}
 
-			/* Notification payload is limited to ATT_MTU - 3 (opcode +
-			 * handle overhead). Hook runs here (thread context) after
-			 * claiming raw ring bytes; finish consumes pre-hook length. */
 			max_send = proxy_nus_chunk_limit(bt_gatt_get_mtu(conn));
 
-			claimed = ring_buf_get_claim(&uart_rx_ringbuf, &chunk,
-						     max_send);
+			claimed = uart_bridge_rx_claim(&chunk, max_send);
 			if (claimed == 0) {
 				bt_conn_unref(conn);
 				break;
 			}
 
-			{
-				static uint8_t proc_buf[PROC_BUF_SIZE];
-				size_t out_len = on_uart_rx(chunk, claimed, proc_buf,
-							    sizeof(proc_buf));
-				size_t sent = 0;
+			/* The interception hook runs here, in thread context —
+			 * not in the UART ISR, where the filter/framing logic it
+			 * exists for would not belong. It sees whatever the ring
+			 * held contiguously up to max_send, so its chunk
+			 * boundaries differ from the UART's; hooks have never
+			 * been promised framing (see proxy_core.h). */
+			size_t out_len = on_uart_rx(chunk, claimed, proc_buf,
+						   sizeof(proc_buf));
 
-				/* Ring bytes consumed regardless of send outcome —
-				 * -ENOMEM/-EAGAIN retries come from proc_buf. */
-				ring_buf_get_finish(&uart_rx_ringbuf, claimed);
+			/* Consume the *ring* bytes we claimed, which is not what
+			 * we are about to send: the hook may have grown, shrunk
+			 * or dropped the data, and it now lives in proc_buf. */
+			uart_bridge_rx_finish(claimed);
 
-				while (sent < out_len) {
-					uint16_t n = (uint16_t)MIN(out_len - sent,
-								   max_send);
-
-					err = bt_nus_send(conn, proc_buf + sent, n);
-					switch (proxy_send_result(err)) {
-					case PROXY_SEND_CONSUMED:
-						sent += n;
-						break;
-					case PROXY_SEND_RETRY:
-						k_sleep(K_MSEC(10));
-						break;
-					default:
-						sent = out_len; /* drop remainder */
-						break;
-					}
-				}
-			}
+			send_processed(conn, proc_buf, out_len, max_send);
 
 			bt_conn_unref(conn);
 		}
 
-		/* Periodic drop report (thread context only — never from ISR). */
-		{
-			uint32_t rx = (uint32_t)atomic_get(&drops_uart_rx_ring);
-			uint32_t tx = (uint32_t)atomic_get(&drops_uart_tx);
-			bool changed = (rx != last_rx) || (tx != last_tx);
-			uint32_t now = k_uptime_get_32();
-
-			if (drop_stats_should_report(now, last_report_ms,
-						     DROP_REPORT_INTERVAL_MS,
-						     changed)) {
-				int tx_err = (int)atomic_get(&last_uart_tx_err);
-
-				LOG_WRN("drops: uart_rx_ring=%u uart_tx=%u "
-					"last_uart_tx_err=%d",
-					rx, tx, tx_err);
-				last_rx = rx;
-				last_tx = tx;
-				last_report_ms = now;
-			}
-		}
+		/* Periodic drop report. The counters are bumped from the UART
+		 * ISR, so the logging has to happen out here in thread context —
+		 * uart_bridge owns the counters, this thread owns the reporting. */
+		uart_bridge_log_drops_if_due();
 	}
 }
 
@@ -1121,14 +862,13 @@ int main(void)
 	leds_init();
 	k_work_init_delayable(&adv_slow_work, adv_slow_handler);
 	k_work_init_delayable(&adv_retry_work, adv_retry_handler);
-	k_work_init_delayable(&uart_rx_retry_work, uart_rx_retry_handler);
 	k_work_init_delayable(&security_timeout_work, security_timeout_handler);
 
 	/* Check the bond-reset button before bringing up BLE: held through boot,
 	 * it wipes the stored pairing (applied after settings_load below). */
 	bool factory_reset = bond_reset_requested();
 
-	err = uart_init();
+	err = uart_bridge_init(uart_dev, &rx_data_ready);
 	if (err) {
 		LOG_ERR("UART init failed (%d)", err);
 		set_status_leds(STATUS_ERROR);
@@ -1160,11 +900,11 @@ int main(void)
 	/* Apply the resolved name to the GAP Device Name characteristic and the
 	 * advertising payload (after settings_load so a restored name cannot
 	 * overwrite the hardware-ID-derived one). */
-	err = bt_set_name(device_name);
+	err = bt_set_name(identity.name);
 	if (err) {
 		LOG_WRN("bt_set_name failed (%d)", err);
 	}
-	ad[1].data_len = strlen(device_name);
+	ad[1].data_len = strlen(identity.name);
 
 	err = bt_nus_init(&nus_cb);
 	if (err) {

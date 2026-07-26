@@ -1,0 +1,68 @@
+name: Set up an nRF Connect SDK workspace
+description: >
+  Materialise an NCS west workspace at $GITHUB_WORKSPACE/ncs, mirroring the local
+  build flow (west build runs from inside the workspace with the app dir as the
+  source dir). The caller checks this repo out at $GITHUB_WORKSPACE/nrfProxy
+  first -- deliberately a sibling of the workspace, never nested inside it: west
+  resolves its topdir by walking up from the cwd, so a nested app would be read
+  as part of the workspace manifest. The checkout directory name matters: sysbuild
+  names the image directory after it, so checking out as "app" would put the
+  artifacts in build_*/app/ instead of the documented build_*/nrfProxy/.
+
+inputs:
+  ncs-rev:
+    description: sdk-nrf revision (tag/branch) to initialise the workspace at.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The container user does not own the checkout, so git (including west's own
+    # calls) refuses to touch the repos until they are marked safe.
+    - name: Trust the workspace directories
+      shell: bash
+      run: git config --global --add safe.directory '*'
+
+    - name: Restore the NCS workspace cache
+      id: ncs-cache
+      uses: actions/cache@v4
+      with:
+        path: ncs
+        # Content-addressed by the SDK revision alone: a given tag always
+        # resolves to the same manifest, so the workspace is reproducible.
+        key: ncs-${{ inputs.ncs-rev }}-${{ runner.os }}
+        restore-keys: ncs-${{ inputs.ncs-rev }}-
+
+    # Shallow + narrow: a full NCS workspace is many GB and the build only needs
+    # the pinned revision's trees.
+    - name: Initialise the workspace
+      if: steps.ncs-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        west init -m https://github.com/nrfconnect/sdk-nrf --mr "${{ inputs.ncs-rev }}" ncs
+        cd ncs
+        west update --narrow -o=--depth=1
+
+    # ZEPHYR_BASE is what the app's find_package(Zephyr) resolves against. west
+    # exports it for its own subcommands, but publish it for direct cmake/twister
+    # invocations too.
+    - name: Export the Zephyr environment
+      shell: bash
+      run: |
+        cd ncs
+        west zephyr-export
+        echo "ZEPHYR_BASE=$GITHUB_WORKSPACE/ncs/zephyr" >> "$GITHUB_ENV"
+
+    # Fail loudly here rather than inside a build step: a broken toolchain env in
+    # the container is the single most likely CI-only failure mode, and the
+    # symptom otherwise ("BT_NUS undefined", "no such board") points elsewhere.
+    - name: Report the toolchain
+      shell: bash
+      run: |
+        west --version
+        cmake --version | head -1
+        echo "ZEPHYR_BASE=$ZEPHYR_BASE"
+        test -d "$GITHUB_WORKSPACE/ncs/nrf" || {
+          echo "::error::the 'nrf' module is missing — NUS/BT_NUS would not build"
+          exit 1
+        }

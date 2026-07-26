@@ -22,7 +22,19 @@ apps.
 
 ## Files
 
-- `src/main.c` — entire application (UART async driver, BLE/NUS, the bridge logic).
+- `src/main.c` — the application's Zephyr/BLE glue: UART async driver, BLE/NUS, LEDs,
+  connection lifetime, the locking.
+- `src/uart_bridge.c` / `src/uart_bridge.h` — the UART data path: the async driver glue
+  (`uart_cb`, the RX buffer slab) and both ring buffers. **No Bluetooth dependency**, so
+  it's driven against an emulated UART in `tests/integration/`. Its header carries the
+  SPSC/`irq_lock` contract — read it before touching the rings.
+- `src/proxy_core.c` / `src/proxy_core.h` — the pure logic main.c decides with:
+  the interception hooks, identity derivation, the advertising/forwarding predicates,
+  NUS chunk sizing and send-error policy. **Binding rule: no Zephyr dependency of any
+  kind** (no kernel objects, BT calls, logging, or Kconfig symbols) — that's what makes
+  it unit-testable off-target, so types cross the boundary as plain bytes and
+  milliseconds and `main.c` BUILD_ASSERTs the couplings. Unit-tested under
+  `tests/unit/`.
 - `prj.conf` — Kconfig: BLE peripheral + NUS, async UART, MTU/throughput tuning, debug flags.
 - `prod.conf` — optional **production** fragment for the XIAO (battery use): drops logging
   and the USB CDC-ACM console. Applied via `EXTRA_CONF_FILE`, *not* auto-merged — see
@@ -36,36 +48,130 @@ apps.
   `_uf2` suffix — naming them `promicro_nrf52840_nrf52840.*` (no variant) is silently
   ignored and the overlay won't apply (uart1 stays disabled → `DEVICE_DT_GET` build
   error). The XIAO/DK have no variant, hence no suffix.
-- `CMakeLists.txt` — standard Zephyr app boilerplate; only `src/main.c` is compiled.
+- `CMakeLists.txt` — standard Zephyr app boilerplate; compiles `src/main.c`,
+  `src/proxy_core.c` and `src/uart_bridge.c`.
 - `README.md` — user-facing overview: supported-board table, how to run the `build.ps1`/
   `build.sh` wrappers, flashing, and the per-board Kconfig-fragment list. This file
   (`CLAUDE.md`) stays the deep reference (build-env setup, flash offsets, gotchas).
+- `tests/unit/{hooks,identity,policy}/` — ztest suites for `proxy_core`, run on
+  `native_sim`. They compile `src/proxy_core.c` straight in; no BLE stack, no board.
+- `tests/integration/uart_bridge/` — ztest suite driving the real `src/uart_bridge.c`
+  against Zephyr's emulated UART (`uart_emul`) on `native_sim`.
+- `scripts/check_configs.py` — asserts the per-target build invariants (flash offsets,
+  Partition Manager off, async-UART gating, `prod.conf` keeping the pairing lock). Run it
+  after building: `python scripts/check_configs.py [target]`. `scripts/test_check_configs.py`
+  is its own test suite (stdlib `unittest`, no SDK needed).
+- `.github/workflows/ci.yml` + `.github/actions/setup-ncs/` — CI: lint, the six-config build
+  matrix with the assertions above, and both native_sim suites, in Nordic's pinned toolchain
+  container. `.github/dependabot.yml` — github-actions bumps only.
+- `ADD_TESTING_PLAN.md` — the testing/CI plan, its findings log, and what is deliberately
+  *not* covered (bsim/Phase 5, and the E4/E5/E6 gaps). `ARCHITECTURE.md` — the system as
+  built, plus the testability analysis.
 - `.mcp.json` — Memfault MCP server config (unrelated to firmware).
 
-There is no test suite and no Cursor/Copilot rules.
+**Testing:** `native_sim` is Linux-only, so the ztest suites run in CI (or WSL), not on the
+Windows dev box — the six-config build matrix is the part that runs natively on Windows. See
+the README's "Testing" section. No Cursor/Copilot rules.
 
 ## Build environment (IMPORTANT — read before building)
 
-The nRF Connect SDK is installed at `C:\ncs\v3.3.1` (Zephyr 4.3.99) with toolchain
-`936afb6332`. `west`, `cmake`, etc. are **not on PATH** by default. Set the environment,
-then build **from inside the NCS workspace** so the `nrf` module is in scope:
+The nRF Connect SDK is v3.3.1 (Zephyr 4.3.99) with toolchain `936afb6332`. **The install
+location is not fixed** — `C:\ncs` is only the default. On the current dev machine the SDK
+is on **`D:\ncs`** because C: hasn't the room (see "SDK on another drive" below). Use the
+wrappers and pass the location, rather than hard-coding a drive:
+
+```powershell
+.\build.ps1 dk -Ncs D:\ncs\v3.3.1 -Toolchain D:\ncs\toolchains\936afb6332
+# or set it once per shell:
+$env:NRFPROXY_NCS = 'D:\ncs\v3.3.1'; $env:NRFPROXY_TOOLCHAIN = 'D:\ncs\toolchains\936afb6332'
+.\build.ps1
+```
+
+`west`, `cmake`, etc. are **not on PATH** by default; `build.ps1` sets the whole environment
+for you. To do it by hand (this is exactly what the wrapper does):
 
 ```powershell
 $proj = (Resolve-Path .).Path     # run this from your nrfProxy checkout
-$tc = "C:\ncs\toolchains\936afb6332"
+$ncs = "D:\ncs\v3.3.1"            # or C:\ncs\v3.3.1 — wherever it's installed
+$tc = "D:\ncs\toolchains\936afb6332"
 $env:PATH = "$tc;$tc\mingw64\bin;$tc\bin;$tc\opt\bin;$tc\opt\bin\Scripts;$tc\opt\nanopb\generator-bin;$tc\nrfutil\bin;$tc\opt\zephyr-sdk\arm-zephyr-eabi\bin;$tc\opt\zephyr-sdk\riscv64-zephyr-elf\bin;$env:PATH"
 $env:PYTHONPATH = "$tc\opt\bin;$tc\opt\bin\Lib;$tc\opt\bin\Lib\site-packages"
 $env:NRFUTIL_HOME = "$tc\nrfutil\home"
 $env:ZEPHYR_TOOLCHAIN_VARIANT = "zephyr"
 $env:ZEPHYR_SDK_INSTALL_DIR = "$tc\opt\zephyr-sdk"
-Set-Location "C:\ncs\v3.3.1"
+$env:ZEPHYR_BASE = "$ncs\zephyr"   # how west finds the workspace + the nrf module
 west build -b nrf52840dk/nrf52840 -d "$proj\build_devkit" "$proj" -- -DSB_CONFIG_PARTITION_MANAGER=n
 ```
 
-In the commands below, `$proj` is the path to this checkout (set as above); `C:\ncs\*` are
-the standard nRF Connect SDK install locations (the `build.ps1`/`build.sh` wrappers let you
-override all three via the `NRFPROXY_PROJ` / `NRFPROXY_NCS` / `NRFPROXY_TOOLCHAIN` env vars
-or their parameters — see the README).
+**Run `west build` from `$proj`, not from inside the workspace.** `ZEPHYR_BASE` is what puts
+the `nrf` module in scope — `cd`-ing into the workspace is not required and actively breaks a
+cross-drive setup (next section). Verify west agrees with `west topdir` (it should print the
+workspace).
+
+In the commands below, `$proj` is the path to this checkout (set as above). The
+`build.ps1`/`build.sh` wrappers let you override all three locations via the
+`NRFPROXY_PROJ` / `NRFPROXY_NCS` / `NRFPROXY_TOOLCHAIN` env vars or their parameters — see
+the README.
+
+### Installing the SDK somewhere other than C: (⚠ the VS Code extension gets this wrong)
+
+The **nRF Connect VS Code extension lets you pick another drive and then extracts to
+`C:\ncs` anyway** — confirmed on this machine. Install from the CLI instead; `nrfutil`'s
+`install-dir` is honoured by the extractor, not just the downloader:
+
+```powershell
+$nrf = "$env:USERPROFILE\.nrfutil\bin\nrfutil.exe"   # nrfutil is not on PATH
+& $nrf install toolchain-manager
+& $nrf toolchain-manager config --set install-dir=D:\ncs
+& $nrf toolchain-manager config --show               # confirm BEFORE downloading
+& $nrf toolchain-manager install --ncs-version v3.3.1
+```
+
+That gives the **toolchain** only (`D:\ncs\toolchains\936afb6332`, ~4.4 GB). The SDK source
+is a separate step — activate the toolchain env as above, then:
+
+```powershell
+west init -m https://github.com/nrfconnect/sdk-nrf --mr v3.3.1 D:\ncs\v3.3.1
+Set-Location D:\ncs\v3.3.1
+west update --narrow -o=--depth=1   # ~2.9 GB; drop --narrow for full history
+```
+
+Sanity checks: `D:\ncs\v3.3.1\nrf\include\bluetooth\services\nus.h` exists (proves it's NCS,
+not plain Zephyr — see the `CONFIG_BT_NUS` gotcha), `west list` shows ~50 modules including
+`nrf` and `zephyr`, and no `C:\ncs` appeared.
+
+### SDK on another drive: run west from the project, not the workspace
+
+If the SDK and the checkout are on **different drives**, `west build` run with the cwd inside
+the workspace dies before compiling anything:
+
+```
+File "…/zephyr/scripts/west_commands/build.py", line 535, in _sanity_check_source_dir
+    srcrel = os.path.relpath(self.source_dir)
+ValueError: path is on mount 'C:', start on mount 'D:'
+```
+
+Zephyr's sanity check computes a *relative* path from the cwd to the source dir, and on
+Windows there is no relative path between drives. The fix is the one baked into `build.ps1`:
+set `ZEPHYR_BASE` and keep the cwd on the project's drive. Nothing else is needed — west
+finds the workspace through `ZEPHYR_BASE`, and the resulting image is identical (verified:
+same 232552 B FLASH as CI).
+
+### ⚠ Windows MAX_PATH: keep the build directory shallow
+
+nrf_security's object paths are ~200 characters *before* your build dir is prepended, so a
+deep checkout overruns the 260-char limit and the build dies part-way through with a
+misleading error:
+
+```
+fatal error: opening dependency file …\oberon_key_management.c.obj.d: No such file or directory
+```
+
+`C:\Users\<you>\projects\nrfProxy` has ~55 characters of headroom and is fine. A git worktree
+under `.claude\worktrees\<long-branch-name>\` is **not** — and it gets worse because sysbuild
+names the image directory after the source directory, so a long branch name is paid twice.
+Build such trees with `-d` pointing somewhere short (`west build … -d D:\b\dk`), or enable
+Win32 long paths.
 
 - **DTS partitioning (`-DSB_CONFIG_PARTITION_MANAGER=n`).** Every build disables the
   nRF Connect SDK **Partition Manager** — which is *deprecated* in NCS v3.3.1 — so the flash
@@ -216,9 +322,10 @@ not upstream Zephyr. If a build errors with *"attempt to assign value 'y' to und
 symbol BT_NUS"* (or `nus.h: No such file`), the build is using a **plain Zephyr** tree
 instead of NCS. If a separate standalone (plain-upstream) Zephyr workspace also exists on the
 machine, never build against it. Symptoms: a `ZEPHYR_BASE` pointing at that plain-Zephyr tree
-(not under `C:\ncs`) in `build_devkit/CMakeCache.txt`, and no `nrf` entry in
-`build_devkit/zephyr_modules.txt`. Fix the IDE build config's **SDK = nRF Connect SDK
-v3.3.1**, and on the CLI rebuild `--pristine` from the NCS workspace (`C:\ncs\v3.3.1`).
+(not at your NCS workspace's `zephyr/`) in `build_devkit/CMakeCache.txt`, and no `nrf` entry
+in `build_devkit/zephyr_modules.txt`. Fix the IDE build config's **SDK = nRF Connect SDK
+v3.3.1**, and on the CLI rebuild `--pristine` with `ZEPHYR_BASE` set to the NCS workspace's
+`zephyr/` (`build.ps1` does this from `-Ncs`/`NRFPROXY_NCS`).
 A non-pristine `-d build_devkit` reuses the cached (wrong) `ZEPHYR_BASE`.
 
 ### Per-instance UART async gating (`-ENOSYS`/-88 from uart_callback_set)
@@ -237,26 +344,34 @@ the same `CONFIG_UART_<n>_INTERRUPT_DRIVEN=n`. Verify with `CONFIG_UART_1_ASYNC=
 
 ## Architecture
 
-Single file, two independent data paths decoupled by ring buffers so the UART byte rate
-and BLE throughput don't have to match.
+Three files (`main.c` = Zephyr/BLE glue, `uart_bridge.c` = the UART data path,
+`proxy_core.c` = pure logic), two independent data paths decoupled by ring buffers so the
+UART byte rate and BLE throughput don't have to match.
 
 **Serial → phone:** UART1 async RX (double-buffered via `uart_rx_slab`) runs `uart_cb`
-in **ISR context**. Each `UART_RX_RDY` chunk passes through the `on_uart_rx` hook, is
-pushed to `uart_rx_ringbuf`, and signals `rx_data_ready`. `ble_write_thread` drains the
-ring buffer and sends chunks (sized to the negotiated ATT MTU − 3) via `bt_nus_send`. On
-`-ENOMEM`/`-EAGAIN` it keeps the data and backs off; otherwise consumes it. With no
-connection, buffered data is discarded (intentional — data is repetitive/safe to drop).
+in **ISR context**, which does nothing but push the **raw** bytes into
+`uart_rx_ringbuf` and signal `rx_data_ready`. `ble_write_thread` claims up to one
+notification's worth (ATT MTU − 3), runs the `on_uart_rx` hook on it, consumes the claimed
+*ring* bytes, and sends the hook's output via `bt_nus_send` — in slices, since the hook may
+grow the data past the MTU (`proxy_next_slice`). On `-ENOMEM`/`-EAGAIN` it retries **from
+the scratch buffer**, never by re-claiming (the ring bytes are already gone); any other
+error drops the remainder. With no connection, buffered data is discarded (intentional —
+data is repetitive/safe to drop).
 
 **Phone → serial:** `nus_received` (Bluetooth RX thread) passes data through the
-`on_ble_rx` hook into `uart_tx_ringbuf`, then `uart_tx_kick()`. Because `uart_tx()` allows
-only one transfer in flight, `uart_tx_kick()` stages one contiguous chunk in `uart_tx_buf`
-and the next chunk is started from the `UART_TX_DONE` event. The in-progress flag is
-guarded with `irq_lock` so kicks from thread and ISR don't double-start.
+`on_ble_rx` hook into `uart_bridge_send()`, which queues it in `uart_tx_ringbuf` and calls
+`uart_tx_kick()`. Because `uart_tx()` allows only one transfer in flight, `uart_tx_kick()`
+stages one contiguous chunk in `uart_tx_buf` and the next chunk is started from the
+`UART_TX_DONE` event. The in-progress flag is guarded with `irq_lock` so kicks from thread
+and ISR don't double-start.
 
-**Interception hooks (`on_uart_rx`, `on_ble_rx`):** the intended place to inspect/modify/
-filter data. Each copies `in`→`out` (scratch buffer, capacity `PROC_BUF_SIZE`) and returns
-the output length; return 0 to drop. They can grow the data. **`on_uart_rx` runs in ISR
-context — keep it light;** `on_ble_rx` runs in a thread.
+**Interception hooks (`on_uart_rx`, `on_ble_rx`, in `proxy_core.c`):** the intended place
+to inspect/modify/filter data. Each copies `in`→`out` (scratch buffer, capacity
+`PROC_BUF_SIZE`) and returns the output length; return 0 to drop. They can grow the data.
+**Both now run in thread context** — `on_uart_rx` in `ble_write_thread`, `on_ble_rx` in the
+BT RX thread — so filter/framing logic is fine in them. (`on_uart_rx` used to run in the
+UART ISR; it was moved deliberately. Consequence: it sees the *ring's* chunking, not the
+UART's.)
 
 **Connection lifetime:** `current_conn` is guarded by `conn_mutex`. `ble_write_thread`
 takes its own `bt_conn_ref()` under the mutex before using the connection and unrefs after,

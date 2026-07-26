@@ -1,0 +1,7 @@
+tests:
+  proxy_core.hooks:
+    platform_allow:
+      - native_sim
+    tags:
+      - proxy_core
+      - unit

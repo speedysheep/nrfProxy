@@ -43,8 +43,8 @@ static void expect_str(const char *n, const char *got, const char *want)
 
 int main(void)
 {
-	uint8_t out[PROXY_PROC_BUF_SIZE];
-	uint8_t in[PROXY_PROC_BUF_SIZE];
+	uint8_t out[PROC_BUF_SIZE];
+	uint8_t in[PROC_BUF_SIZE];
 	size_t n;
 
 	/* --- hooks --- */
@@ -55,8 +55,8 @@ int main(void)
 	expect_u("hook passthrough len", n, 8);
 	expect_true("hook passthrough data", memcmp(in, out, 8) == 0);
 	expect_u("hook zero", on_uart_rx(in, 0, out, sizeof(out)), 0);
-	n = on_uart_rx(in, PROXY_PROC_BUF_SIZE, out, PROXY_PROC_BUF_SIZE);
-	expect_u("hook full buf", n, PROXY_PROC_BUF_SIZE);
+	n = on_uart_rx(in, PROC_BUF_SIZE, out, PROC_BUF_SIZE);
+	expect_u("hook full buf", n, PROC_BUF_SIZE);
 	n = on_ble_rx(in, 5, out, sizeof(out));
 	expect_u("ble hook", n, 5);
 
@@ -65,19 +65,19 @@ int main(void)
 		uint8_t hwid[8] = { 0x11, 0x22, 0x33, 0x44, 0x7A, 0x3F, 0x00, 0x00 };
 		struct proxy_identity id;
 
-		proxy_identity_derive(hwid, 8, "nrfProxy", &id);
+		proxy_identity_derive("nrfProxy", hwid, 8, &id);
 		expect_true("addr_valid", id.addr_valid);
-		expect_true("static MSBs", (id.addr.a.val[5] & 0xc0) == 0xc0);
+		expect_true("static MSBs", (id.addr[5] & 0xc0) == 0xc0);
 		expect_str("name suffix", id.name, "nrfProxy-3F7A");
 		expect_true("mfg_id", memcmp(id.mfg_id, hwid, 4) == 0);
 
-		proxy_identity_derive(hwid, 8, "nrfProxy", &id);
+		proxy_identity_derive("nrfProxy", hwid, 8, &id);
 		struct proxy_identity id2;
-		proxy_identity_derive(hwid, 8, "nrfProxy", &id2);
+		proxy_identity_derive("nrfProxy", hwid, 8, &id2);
 		expect_true("deterministic",
 			    memcmp(&id, &id2, sizeof(id)) == 0);
 
-		proxy_identity_derive(hwid, 5, "nrfProxy", &id);
+		proxy_identity_derive("nrfProxy", hwid, 5, &id);
 		expect_true("short hwid invalid", !id.addr_valid);
 		expect_str("short hwid name", id.name, "nrfProxy");
 	}

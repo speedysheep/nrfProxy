@@ -13,7 +13,7 @@ function Fail($msg) {
 function Ok($msg) { Write-Host "ok   $msg" }
 
 # bt_set_name must appear after settings_load in main()
-$setName = $text.IndexOf("bt_set_name(device_name)")
+$setName = $text.IndexOf("bt_set_name(identity.name)")
 $settings = $text.IndexOf("settings_load()")
 if ($setName -lt 0 -or $settings -lt 0) {
     Fail "bt_set_name or settings_load not found"
@@ -35,7 +35,7 @@ if ($text -match 'Mutex exemption') {
     Fail "locked_mode mutex exemption comment missing"
 }
 
-if ($text -match 'Deliberately only the RX ring') {
+if ($text -match 'TX ring is deliberately left alone') {
     Ok "TX ring disconnect asymmetry documented"
 } else {
     Fail "TX ring disconnect asymmetry comment missing"

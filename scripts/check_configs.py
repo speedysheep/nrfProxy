@@ -1,242 +1,274 @@
 #!/usr/bin/env python3
-"""Assert post-build Kconfig / layout invariants for nrfProxy board targets.
+"""Assert the build-configuration invariants of every nrfProxy target.
+
+Each check here mechanises a rule that was previously enforced only by a comment
+in CLAUDE.md and a human grepping build*/nrfProxy/zephyr/.config. Every one of
+them has a bug behind it -- see ARCHITECTURE.md sections 5 and 7:
+
+  A7   flash offset per board. Partition Manager once linked the Pro Micro at
+       0x0 while the UF2 step still copied it to 0x26000: boot loop on every
+       reset.
+  A8   uart1 keeps the async API. UART_1_INTERRUPT_DRIVEN defaults y as soon as
+       anything enables CONFIG_UART_INTERRUPT_DRIVEN (the USB CDC-ACM console
+       does), which silently drops uart1's async API -> uart_callback_set()
+       returns -ENOSYS at runtime, on those boards only.
+  A9   prod.conf strips logging and the USB console but must not strip the
+       serial driver or the pairing lock -- production needs the lock most.
+  A10  no partitions.yml: proof Partition Manager really is disabled and the
+       layout comes from devicetree.
+  A11  the pairing lock's Kconfig set: one connection, one bond, accept list.
 
 Usage:
-  python scripts/check_configs.py <target> <build_dir>
-  python scripts/check_configs.py --self-test
+    python scripts/check_configs.py                    # all six targets
+    python scripts/check_configs.py dk xiao_prod       # named targets
+    python scripts/check_configs.py dk --build-dir /tmp/scratch
+    python scripts/check_configs.py --proj /path/to/nrfProxy
 
-Targets match build.ps1: dk, xiao, xiao_prod, promicro, promicro_prod, dongle.
+Exits non-zero if any check fails. Python 3 stdlib only, so it runs both in CI
+and next to build.ps1 on a Windows box (the NCS toolchain bundles python).
 """
-
-from __future__ import annotations
 
 import argparse
+import glob
 import os
+import re
 import sys
-import tempfile
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
-# Flash load offsets (hex strings as they appear in .config).
-OFFSETS = {
-    "dk": "0x0",
-    "xiao": "0x27000",
-    "xiao_prod": "0x27000",
-    "promicro": "0x26000",
-    "promicro_prod": "0x26000",
-    "dongle": "0x1000",
+# Target table, keyed the same as build.ps1 / build.sh. `offset` is the address
+# the image must link at: DK has no bootloader; the XIAO and Pro Micro take
+# theirs from the devicetree code_partition (their bootloaders reserve the space
+# below); the dongle is the one board where it comes from the board Kconfig's
+# CONFIG_FLASH_LOAD_OFFSET instead, leaving room for the Nordic USB bootloader.
+TARGETS = {
+    "dk": {
+        "board": "nrf52840dk/nrf52840",
+        "build_dir": "build_devkit",
+        "offset": 0x0,
+        "prod": False,
+    },
+    "xiao": {
+        "board": "xiao_ble/nrf52840",
+        "build_dir": "build_xiao",
+        "offset": 0x27000,
+        "prod": False,
+    },
+    "xiao_prod": {
+        "board": "xiao_ble/nrf52840",
+        "build_dir": "build_xiao_prod",
+        "offset": 0x27000,
+        "prod": True,
+    },
+    "promicro": {
+        "board": "promicro_nrf52840/nrf52840/uf2",
+        "build_dir": "build_promicro",
+        "offset": 0x26000,
+        "prod": False,
+    },
+    "promicro_prod": {
+        "board": "promicro_nrf52840/nrf52840/uf2",
+        "build_dir": "build_promicro_prod",
+        "offset": 0x26000,
+        "prod": True,
+    },
+    "dongle": {
+        "board": "nrf52840dongle/nrf52840",
+        "build_dir": "build_dongle",
+        "offset": 0x1000,
+        "prod": False,
+    },
 }
 
-PROD_TARGETS = {"xiao_prod", "promicro_prod"}
+# The application image's .config, relative to the build dir. sysbuild is kept
+# (only Partition Manager is off), so the app lives in its own image subdir --
+# named after the application's *source directory*, which is why this is not
+# simply hard-coded (see find_app_config).
+IMAGE_DIR = "nrfProxy"
+CONFIG_TAIL = os.path.join("zephyr", ".config")
+CONFIG_PATH = os.path.join(IMAGE_DIR, CONFIG_TAIL)
+
+_ASSIGNMENT = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$")
 
 
-def parse_config(path: Path) -> Dict[str, Optional[str]]:
-    """Parse a Zephyr .config into name -> value (None means '=n' / unset-as-n)."""
-    cfg: Dict[str, Optional[str]] = {}
-    text = path.read_text(encoding="utf-8", errors="replace")
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            # "# CONFIG_FOO is not set"
-            if line.startswith("# CONFIG_") and line.endswith(" is not set"):
-                name = line[len("# ") : -len(" is not set")]
-                cfg[name] = None
-            continue
-        if "=" not in line:
-            continue
-        name, val = line.split("=", 1)
-        cfg[name] = val.strip().strip('"')
-    return cfg
+class CheckError(Exception):
+    """A check could not run at all (missing build dir, unreadable .config)."""
 
 
-def find_dotconfig(build_dir: Path) -> Path:
-    candidates = [
-        build_dir / "nrfProxy" / "zephyr" / ".config",
-        build_dir / "zephyr" / ".config",
-        build_dir / ".config",
-    ]
-    for c in candidates:
-        if c.is_file():
-            return c
-    raise FileNotFoundError(
-        f"no .config under {build_dir} (tried {[str(c) for c in candidates]})"
-    )
+def load_config(path):
+    """Parse a Kconfig .config into {symbol: raw value}.
 
-
-def check_target(target: str, build_dir: Path) -> List[str]:
-    errors: List[str] = []
-    if target not in OFFSETS:
-        return [f"unknown target {target!r}; expected one of {sorted(OFFSETS)}"]
-
+    Disabled symbols are written as `# CONFIG_X is not set`, so they are simply
+    absent from the result -- callers test for "not set" with `not in`.
+    """
+    values = {}
     try:
-        cfg_path = find_dotconfig(build_dir)
-    except FileNotFoundError as e:
-        return [str(e)]
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                match = _ASSIGNMENT.match(line.strip())
+                if match:
+                    values[match.group(1)] = match.group(2)
+    except (IOError, OSError) as err:
+        raise CheckError("cannot read {}: {}".format(path, err))
 
-    cfg = parse_config(cfg_path)
-
-    def expect_y(name: str) -> None:
-        if cfg.get(name) != "y":
-            errors.append(f"{name}: expected y, got {cfg.get(name)!r}")
-
-    def expect_not_y(name: str) -> None:
-        if cfg.get(name) == "y":
-            errors.append(f"{name}: must not be y")
-
-    def expect_unset_or_n(name: str) -> None:
-        val = cfg.get(name)
-        if val == "y":
-            errors.append(f"{name}: expected unset/n for prod, got y")
-
-    # Offset
-    want = OFFSETS[target]
-    got = cfg.get("CONFIG_FLASH_LOAD_OFFSET")
-    if got != want:
-        errors.append(f"CONFIG_FLASH_LOAD_OFFSET: expected {want}, got {got!r}")
-
-    expect_y("CONFIG_UART_1_ASYNC")
-    expect_not_y("CONFIG_UART_1_INTERRUPT_DRIVEN")
-
-    if cfg.get("CONFIG_BT_MAX_CONN") != "1":
-        errors.append(
-            f"CONFIG_BT_MAX_CONN: expected 1, got {cfg.get('CONFIG_BT_MAX_CONN')!r}"
-        )
-    if cfg.get("CONFIG_BT_MAX_PAIRED") != "1":
-        errors.append(
-            f"CONFIG_BT_MAX_PAIRED: expected 1, got {cfg.get('CONFIG_BT_MAX_PAIRED')!r}"
-        )
-    expect_y("CONFIG_BT_FILTER_ACCEPT_LIST")
-
-    if target in PROD_TARGETS:
-        expect_unset_or_n("CONFIG_LOG")
-        expect_y("CONFIG_SERIAL")
-        expect_y("CONFIG_BT_SMP")
-        expect_y("CONFIG_BT_SETTINGS")
-        expect_y("CONFIG_NVS")
-
-    # No partitions.yml anywhere under build dir (Partition Manager off).
-    for root, _dirs, files in os.walk(build_dir):
-        if "partitions.yml" in files:
-            errors.append(f"partitions.yml present at {Path(root) / 'partitions.yml'}")
-
-    return errors
+    if not values:
+        raise CheckError("{} has no CONFIG_ assignments".format(path))
+    return values
 
 
-def write_fixture(root: Path, relative: str, content: str) -> Path:
-    path = root / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return path
+def find_app_config(build_dir):
+    """Locate the application image's .config inside a sysbuild build dir.
+
+    sysbuild names the image directory after the application's source directory,
+    so a checkout in a differently-named directory (a fork, a CI checkout path)
+    silently moves this file -- hard-coding "nrfProxy/" would make the checker
+    pass or fail on what the repo folder happens to be called. Prefer the
+    documented layout, then fall back to whatever single image dir is present:
+    with Partition Manager off there is exactly one image, and sysbuild's own
+    Kconfig output lives at <build>/zephyr/.config, one level up from the glob.
+    """
+    documented = os.path.join(build_dir, CONFIG_PATH)
+    if os.path.exists(documented):
+        return documented
+
+    matches = sorted(glob.glob(os.path.join(build_dir, "*", CONFIG_TAIL)))
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise CheckError(
+            "no application image .config under {} -- did the build run?".format(
+                build_dir))
+    raise CheckError(
+        "cannot tell which image is the application; found {}".format(
+            ", ".join(matches)))
 
 
-def self_test() -> int:
+def find_partitions_yml(build_dir):
+    """Every partitions.yml under build_dir (its presence means PM ran)."""
+    hits = []
+    for dirpath, _dirnames, filenames in os.walk(build_dir):
+        if "partitions.yml" in filenames:
+            hits.append(os.path.join(dirpath, "partitions.yml"))
+    return hits
+
+
+def _describe(values, symbol):
+    if symbol in values:
+        return "{}={}".format(symbol, values[symbol])
+    return "{} is not set".format(symbol)
+
+
+def check_target(name, spec, build_dir):
+    """Run every check for one target. Returns [(id, description, ok, detail)]."""
+    results = []
+
+    def expect_value(check_id, description, symbol, expected):
+        actual = values.get(symbol)
+        results.append((check_id, description, actual == expected,
+                        _describe(values, symbol)))
+
+    def expect_unset(check_id, description, symbol):
+        results.append((check_id, description, symbol not in values,
+                        _describe(values, symbol)))
+
+    values = load_config(find_app_config(build_dir))
+
+    # A7 -- flash offset. An unset symbol means the default, 0.
+    raw_offset = values.get("CONFIG_FLASH_LOAD_OFFSET", "0")
+    try:
+        offset = int(raw_offset, 0)
+    except ValueError:
+        offset = None
+    results.append((
+        "A7", "links at 0x{:x}".format(spec["offset"]),
+        offset == spec["offset"],
+        "CONFIG_FLASH_LOAD_OFFSET={} (0x{:x})".format(raw_offset, offset)
+        if offset is not None else
+        "CONFIG_FLASH_LOAD_OFFSET={} (unparseable)".format(raw_offset),
+    ))
+
+    # A8 -- uart1 keeps the async API on every board.
+    expect_value("A8", "uart1 async API", "CONFIG_UART_1_ASYNC", "y")
+    expect_unset("A8", "uart1 not interrupt-driven",
+                 "CONFIG_UART_1_INTERRUPT_DRIVEN")
+
+    # A11 -- the pairing lock: one connection, one bond, link-layer filtering.
+    expect_value("A11", "single connection", "CONFIG_BT_MAX_CONN", "1")
+    expect_value("A11", "single bond", "CONFIG_BT_MAX_PAIRED", "1")
+    expect_value("A11", "filter accept list", "CONFIG_BT_FILTER_ACCEPT_LIST", "y")
+
+    # A9 -- what prod.conf may and may not remove. The lock's persistence path
+    # (SMP -> settings -> NVS) is asserted on every build, prod included: that
+    # is the whole point of the invariant.
+    expect_value("A9", "pairing/SMP", "CONFIG_BT_SMP", "y")
+    expect_value("A9", "bond persistence", "CONFIG_BT_SETTINGS", "y")
+    expect_value("A9", "bond storage backend", "CONFIG_NVS", "y")
+    expect_value("A9", "serial driver", "CONFIG_SERIAL", "y")
+    if spec["prod"]:
+        expect_unset("A9", "logging stripped", "CONFIG_LOG")
+        expect_unset("A9", "USB console stripped",
+                     "CONFIG_BOARD_SERIAL_BACKEND_CDC_ACM")
+    else:
+        # The mirror image: prod.conf must not leak into a debug build.
+        expect_value("A9", "logging kept", "CONFIG_LOG", "y")
+
+    # A10 -- Partition Manager is off, so it emitted no layout.
+    stray = find_partitions_yml(build_dir)
+    results.append((
+        "A10", "no partitions.yml (Partition Manager off)", not stray,
+        "found: {}".format(", ".join(stray)) if stray else "none under build dir",
+    ))
+
+    return results
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Assert the nrfProxy build-configuration invariants.")
+    parser.add_argument(
+        "targets", nargs="*", metavar="TARGET", choices=list(TARGETS),
+        default=[],
+        help="targets to check (default: all of {})".format(
+            ", ".join(TARGETS)))
+    parser.add_argument(
+        "--proj", default=os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))),
+        help="project root holding the build dirs (default: this repo)")
+    parser.add_argument(
+        "--build-dir",
+        help="check this build dir instead of the target's default; "
+             "only valid with exactly one target")
+    args = parser.parse_args(argv)
+
+    targets = args.targets or list(TARGETS)
+    if args.build_dir and len(targets) != 1:
+        parser.error("--build-dir needs exactly one target")
+
     failures = 0
+    for name in targets:
+        spec = TARGETS[name]
+        build_dir = args.build_dir or os.path.join(args.proj, spec["build_dir"])
+        print("== {} ({}) -- {}".format(name, spec["board"], build_dir))
 
-    def case(name: str, target: str, cfg: str, expect_ok: bool,
-             extra_files: Optional[List[Tuple[str, str]]] = None) -> None:
-        nonlocal failures
-        with tempfile.TemporaryDirectory() as tmp:
-            build = Path(tmp)
-            write_fixture(build, "nrfProxy/zephyr/.config", cfg)
-            if extra_files:
-                for rel, body in extra_files:
-                    write_fixture(build, rel, body)
-            errs = check_target(target, build)
-            ok = len(errs) == 0
-            if ok != expect_ok:
-                print(f"FAIL {name}: ok={ok} expected_ok={expect_ok} errs={errs}")
+        try:
+            results = check_target(name, spec, build_dir)
+        except CheckError as err:
+            print("   ERROR  {}".format(err))
+            failures += 1
+            continue
+
+        for check_id, description, ok, detail in results:
+            print("   {}  {:<4} {:<34} {}".format(
+                "PASS" if ok else "FAIL", check_id, description, detail))
+            if not ok:
                 failures += 1
-            else:
-                print(f"ok   {name}")
 
-    good_dk = """
-CONFIG_FLASH_LOAD_OFFSET=0x0
-CONFIG_UART_1_ASYNC=y
-# CONFIG_UART_1_INTERRUPT_DRIVEN is not set
-CONFIG_BT_MAX_CONN=1
-CONFIG_BT_MAX_PAIRED=1
-CONFIG_BT_FILTER_ACCEPT_LIST=y
-CONFIG_SERIAL=y
-CONFIG_LOG=y
-"""
-    case("good dk", "dk", good_dk, True)
-
-    bad_offset = good_dk.replace("0x0", "0x1000")
-    case("wrong offset fails", "dk", bad_offset, False)
-
-    case(
-        "partitions.yml fails",
-        "dk",
-        good_dk,
-        False,
-        extra_files=[("partitions.yml", "app:\n  address: 0x0\n")],
-    )
-
-    good_prod = """
-CONFIG_FLASH_LOAD_OFFSET=0x27000
-CONFIG_UART_1_ASYNC=y
-# CONFIG_UART_1_INTERRUPT_DRIVEN is not set
-CONFIG_BT_MAX_CONN=1
-CONFIG_BT_MAX_PAIRED=1
-CONFIG_BT_FILTER_ACCEPT_LIST=y
-CONFIG_SERIAL=y
-# CONFIG_LOG is not set
-CONFIG_BT_SMP=y
-CONFIG_BT_SETTINGS=y
-CONFIG_NVS=y
-"""
-    case("good xiao_prod", "xiao_prod", good_prod, True)
-
-    case(
-        "prod with LOG=y fails",
-        "xiao_prod",
-        good_prod.replace("# CONFIG_LOG is not set", "CONFIG_LOG=y"),
-        False,
-    )
-
-    case(
-        "prod missing BT_SETTINGS fails",
-        "xiao_prod",
-        good_prod.replace("CONFIG_BT_SETTINGS=y\n", ""),
-        False,
-    )
-
-    case(
-        "async missing fails",
-        "dk",
-        good_dk.replace("CONFIG_UART_1_ASYNC=y\n", ""),
-        False,
-    )
-
+    print("")
     if failures:
-        print(f"{failures} self-test failure(s)")
+        print("FAILED: {} check(s) across {} target(s)".format(
+            failures, len(targets)))
         return 1
-    print("all self-tests passed")
-    return 0
-
-
-def main(argv: List[str]) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("target", nargs="?", help="build.ps1 target name")
-    ap.add_argument("build_dir", nargs="?", help="west -d build directory")
-    ap.add_argument("--self-test", action="store_true")
-    args = ap.parse_args(argv)
-
-    if args.self_test:
-        return self_test()
-
-    if not args.target or not args.build_dir:
-        ap.error("target and build_dir required (or pass --self-test)")
-
-    errs = check_target(args.target, Path(args.build_dir))
-    if errs:
-        print(f"check_configs FAILED for {args.target} ({args.build_dir}):")
-        for e in errs:
-            print(f"  - {e}")
-        return 1
-    print(f"check_configs OK: {args.target}")
+    print("OK: all checks passed for {} target(s)".format(len(targets)))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())
