@@ -3,7 +3,7 @@
 [![CI](https://github.com/speedysheep/nrfProxy/actions/workflows/ci.yml/badge.svg)](https://github.com/speedysheep/nrfProxy/actions/workflows/ci.yml)
 
 A Zephyr / nRF Connect SDK application that bridges a serial UART to a phone over
-Bluetooth LE, acting as a **bidirectional proxy**:
+Bluetooth LE — a **bidirectional serial ⇄ Bluetooth LE bridge**:
 
 - **Serial → phone:** bytes received on UART1 are forwarded as BLE notifications via the
   Nordic UART Service (NUS).
@@ -17,6 +17,42 @@ Note this project is almost entirely written by Claude. Progress is wonderful!
 
 "Production" builds are just the regular build, but with optimizations enabled and the
 debug console disabled, to limit power drain.
+
+## Documentation
+
+This README is the user-facing overview — boards, building, flashing, testing. Everything
+else lives in its own document:
+
+### Reference
+
+| Document | What it covers |
+|----------|----------------|
+| [`CLAUDE.md`](CLAUDE.md) | The deep reference: build-environment setup, installing the SDK to another drive, per-board flash offsets, why Partition Manager is disabled, and every board-specific gotcha. Read before building. |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | The system as built — execution contexts, the synchronization model, both data paths, the BLE lifecycle state machine, and the testability analysis that drives the test plan. |
+| [`PAIRING_PLAN.md`](PAIRING_PLAN.md) | Design of the bond-to-first-phone pairing lock: filter accept list, the encryption gate, the security watchdog, and the bond-reset button. |
+| [`ADD_TESTING_PLAN.md`](ADD_TESTING_PLAN.md) | The testing and CI plan, its findings log, and what is deliberately not covered. |
+
+### E-bike feature programme
+
+Planned work to turn the bridge into an e-bike controller companion. [`FEATURE_PLAN.md`](FEATURE_PLAN.md)
+is the master checklist and the place to start; the rest are its workstream details.
+
+| Document | Workstream |
+|----------|-----------|
+| [`FEATURE_PLAN.md`](FEATURE_PLAN.md) | **Master checklist** — topology, decisions, dependency graph, ordering, test strategy, definition of done |
+| [`PROTOCOL_PLAN.md`](PROTOCOL_PLAN.md) | **A** — capture the controller protocols (four of them, different baud rates), parse them, select the right one at runtime |
+| [`LOCK_PLAN.md`](LOCK_PLAN.md) | **B** — motor-enable relay locking, gated on the app being connected and the link encrypted |
+| [`INTERCEPT_PLAN.md`](INTERCEPT_PLAN.md) | **C** — uplink enrichment with extra sensor data, and validation of every command sent to the controller |
+| [`TELEMETRY_PLAN.md`](TELEMETRY_PLAN.md) | **D** — diagnostics and telemetry to the app, compiled out or idle when unused |
+
+### Review findings and follow-ups
+
+| Document | What it covers |
+|----------|----------------|
+| [`TODO.md`](TODO.md) | Code-review findings ranked by severity, with what was fixed and what remains. |
+| [`TODO_ARCHITECTURE.md`](TODO_ARCHITECTURE.md) | Architecture-review follow-up tasks and their progress. |
+
+Licensed under the MIT License — see [`LICENSE`](LICENSE).
 
 ## Supported boards
 
