@@ -5,6 +5,8 @@ HANDOVER.md
 tests/host/*.exe
 tests/host/*.o
 
-# Twister output (unit/integration test runs)
+# Twister output (unit/integration test runs). The -unit/-integration suffixes
+# are what scripts/test_docker.sh writes, keeping the two suites' reports apart.
 twister-out/
 twister-out.*/
+twister-out-*/

@@ -36,16 +36,28 @@ jobs:
       - uses: actions/checkout@v7
 
       # shellcheck is preinstalled on the GitHub-hosted Ubuntu images.
-      - name: shellcheck build.sh
-        run: shellcheck build.sh
+      # Every shell script in the repo, not just build.sh: the docker test
+      # runner and its container-side entry script are the ones a contributor is
+      # most likely to hit a portability bug in, since they run on a different
+      # OS from the box they were written on.
+      - name: shellcheck the shell scripts
+        run: shellcheck build.sh scripts/test_docker.sh scripts/docker_test_entry.sh
 
-      - name: Check PowerShell syntax (build.ps1)
+      - name: Check PowerShell syntax
         shell: pwsh
         run: |
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path ./build.ps1).Path, [ref]$null, [ref]$errors) | Out-Null
-          if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+          $failed = $false
+          foreach ($f in @('./build.ps1', './scripts/test_docker.ps1', './tests/host/run.ps1')) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f).Path, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) {
+              Write-Host "syntax errors in ${f}:"
+              $errors | ForEach-Object { Write-Error $_ }
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
 
       # Tests for the config checker itself: each one breaks a single invariant
       # in a synthetic .config and asserts the matching check goes red. No SDK
