@@ -1,0 +1,15 @@
+# Shell scripts must be LF in the working tree, not just in the repository.
+#
+# This is not a tidiness rule. The dev box is Windows, so git checks files out
+# with CRLF by default; scripts/test_docker.sh then bind-mounts this checkout
+# into a Linux container, where bash reads the CR as part of each command and
+# fails with "$'\r': command not found". The script is unrunnable on the very
+# platform it exists to serve. build.sh has the same problem from WSL.
+#
+# Forcing eol=lf fixes both, and costs nothing on Windows: every editor in play
+# here (and PowerShell) handles LF fine.
+*.sh text eol=lf
+
+# Same reasoning for anything else that a Linux shell or interpreter may execute
+# directly from a mounted checkout.
+*.py text eol=lf
