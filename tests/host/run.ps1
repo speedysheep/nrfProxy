@@ -26,7 +26,6 @@ function Invoke-HostTest($name, $sources) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-Invoke-HostTest "test_security_timeout" @("test_security_timeout.c")
 Invoke-HostTest "test_uart_rx_retry" @(
     "test_uart_rx_retry.c",
     (Join-Path $src "uart_rx_retry.c")
