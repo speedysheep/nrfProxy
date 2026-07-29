@@ -339,8 +339,9 @@ as it is completed. Nothing in B ships to a rider before this is signed off.
 
 **On the bike, wheel off the ground, then a low-speed ride:**
 - [ ] Locked: motor does not assist. Unlocked: normal assist.
-- [ ] Confirm the display behaves sanely in the locked state (some controllers report a fault
-      when the enable line is open — worth knowing before a rider sees it).
+- [ ] Confirm the controller behaves sanely in the locked state, and that the app (which is the
+      display) renders that state sensibly — some controllers report a fault when the enable
+      line is open, and the rider should see something intelligible rather than an error code.
 - [ ] Ride with the phone in a pocket, screen off, for 10+ minutes: no spurious relock, no
       assist interruption. **This is the test that matters most**; a false relock under load is
       the one failure mode with a safety dimension.

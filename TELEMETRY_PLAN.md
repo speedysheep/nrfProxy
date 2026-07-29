@@ -5,7 +5,7 @@ Part of [`FEATURE_PLAN.md`](FEATURE_PLAN.md). Streams health and diagnostic data
 and enforced as a test (D4) rather than assumed.
 
 **Depends on:** B3 (the control service provides the `telemetry` characteristic).
-**Benefits from:** A6 (per-link counters) and A5 (frame-level counters) — but D1 can ship with
+**Benefits from:** A3 (frame-level counters) — but D1 can ship with
 whatever counters exist at the time and grow.
 
 ---
@@ -41,9 +41,9 @@ that is what "optional if there's any significant performance impact" means in p
 |---|---|---|
 | uptime_s | kernel | correlates everything else |
 | lock_state, lock_reason | `lock_core` (B1) | the app already wants this; free here |
-| link RX-overflow / TX-fail / TX-abort counters, per link | `drop_stats` (A6) | the silent-loss points `TODO.md` L1 was raised about |
-| BLE-copy drops (separate from wire drops) | A6 | distinguishes benign from alarming |
-| frame checksum failures, resyncs | `frame.c` (A5) | wiring/EMI problems show here first |
+| RX-overflow / TX-fail / TX-abort counters | `drop_stats` (existing) | the silent-loss points `TODO.md` L1 was raised about |
+| frame checksum failures, resyncs, over-length rejections | `frame.c` (A3) | wiring/EMI problems show here first |
+| downlink commands refused by validation | `intercept` (C3) | an app bug that never reached the controller |
 | ring high-water marks | `uart_bridge` | tells you if the buffers are sized right on real traffic |
 | ATT MTU, connection interval | BT stack | explains throughput complaints (`TODO.md` I1) |
 | sensor staleness flags | `sensor_src` (C2) | is the extra hardware actually alive |
@@ -107,10 +107,10 @@ disconnect**), `tests/host/test_telemetry_core.c` (the gating policy).
 
 **Why:** this is the user's actual acceptance criterion, turned into something CI can fail.
 
-**Files:** `tests/integration/passthrough/` extended, or `tests/integration/telemetry_perf/`.
+**Files:** `tests/integration/uart_bridge/` extended, or a new `tests/integration/telemetry_perf/`.
 
 **The test** on `native_sim` with emulated UARTs:
-1. Drive a sustained burst through the passthrough path with telemetry **compiled out**;
+1. Drive a sustained burst through the uplink datapath with telemetry **compiled out**;
    record datapath drop counters and the message count that made it through intact.
 2. Repeat with telemetry compiled in but **unsubscribed** — must be identical (layer 2).
 3. Repeat with telemetry **subscribed and notifying at 1 Hz** — datapath drops must not exceed
