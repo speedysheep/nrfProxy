@@ -5,11 +5,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this project is
 
 `nrfProxy` is a Zephyr / nRF Connect SDK application that bridges a serial UART to a
-phone over Bluetooth LE, acting as a **bidirectional proxy**:
+phone over Bluetooth LE — a **bidirectional serial ⇄ Bluetooth LE bridge**:
 
 - **Serial → phone:** bytes received on UART1 are forwarded as BLE notifications via the
   Nordic UART Service (NUS).
 - **Phone → serial:** bytes written to the NUS RX characteristic are sent out UART1.
+
+*Not* a proxy, despite the name: a proxy is an intermediary between two endpoints of the
+**same** protocol, whereas this translates between two **different** transports — the serial
+peer and the phone could never talk directly. The name is historical. It is also not a tap:
+a tap is passive, and both directions here are live (the phone→serial direction commands the
+device on the other end of the UART).
 
 Supported boards (each has its own overlay in `boards/`): **nRF52840 DK**
 (`nrf52840dk/nrf52840`), **Seeed XIAO BLE** (`xiao_ble/nrf52840`), the
