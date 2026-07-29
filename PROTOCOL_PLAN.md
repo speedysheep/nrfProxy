@@ -232,8 +232,8 @@ software.
 
 **Runtime baud changes:** `uart_rx_disable()` → `uart_configure()` → `uart_rx_enable()`.
 **⚠ Verify before use:** that `uart_configure()` is supported by the nrfx UARTE driver in
-NCS v3.3.1 — this is assumed, not confirmed. Add it to `ADD_TESTING_PLAN.md`'s
-verify-before-use list.
+NCS v3.3.1 — this is assumed, not confirmed. Record the answer in
+`FEATURE_PLAN.md`'s findings log.
 
 **Confidence monitoring (cheap, worth having):** if checksum failures (A3) exceed a threshold
 over a window while locked, the selection is probably wrong — log it loudly and, if the choice

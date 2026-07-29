@@ -30,7 +30,7 @@ else lives in its own document:
 | [`CLAUDE.md`](CLAUDE.md) | The deep reference: build-environment setup, installing the SDK to another drive, per-board flash offsets, why Partition Manager is disabled, and every board-specific gotcha. Read before building. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | The system as built — execution contexts, the synchronization model, both data paths, the BLE lifecycle state machine, and the testability analysis that drives the test plan. |
 | [`PAIRING_PLAN.md`](PAIRING_PLAN.md) | Design of the bond-to-first-phone pairing lock: filter accept list, the encryption gate, the security watchdog, and the bond-reset button. |
-| [`ADD_TESTING_PLAN.md`](ADD_TESTING_PLAN.md) | The testing and CI plan, its findings log, and what is deliberately not covered. |
+| [`TESTING.md`](TESTING.md) | What is actually tested — the four tiers and their case counts, how to run each locally (including in Docker), what makes a failure fail the build, and what is deliberately not covered. |
 
 ### E-bike feature programme
 
@@ -169,26 +169,42 @@ inside Nordic's pinned toolchain container (`ghcr.io/nrfconnect/sdk-nrf-toolchai
 which materialises an NCS workspace and builds this repo as an out-of-tree application —
 the same flow as the wrapper scripts, just automated.
 
-| Layer | What it protects | Run it locally |
-|-------|------------------|----------------|
-| Build matrix | All six configurations compile | `.\build.ps1` / `./build.sh` |
-| Config assertions | Flash offsets, Partition Manager stays off, async-UART gating, `prod.conf` not stripping the pairing lock | `python scripts/check_configs.py <target>` (after building that target) |
-| Host unit checks | The pure logic that needs no SDK — `proxy_core`, `drop_stats`, `uart_rx_retry`, the security-timeout policy | `powershell -File tests/host/run.ps1` (needs gcc or clang) |
-| Unit tests | The pure logic in `src/proxy_core.c` (hooks, identity derivation, advertising/send policy) | `west twister -T tests/unit -p native_sim` |
-| Integration tests | The UART data path in `src/uart_bridge.c` (ring flow, TX chaining, RX recovery) | `west twister -T tests/integration -p native_sim` |
-| Build-only matrix | The repo-root [`testcase.yaml`](testcase.yaml), run from an NCS workspace | `west twister -T <this repo> …` |
+**121 automated test cases across four tiers**, all of which gate CI:
 
-Unit and integration tests run on Zephyr's **`native_sim`** board, which is **Linux-only** —
-on a Windows development machine run them under WSL or let CI run them. The build matrix and
-the **host unit checks** are the parts that run natively on Windows.
+| Tier | Cases | What it protects | Run it locally |
+|------|-------|------------------|----------------|
+| Host unit checks | **52** | Every Zephyr-free module — `proxy_core`, `drop_stats`, `uart_rx_retry`. The only tier that runs natively on Windows | `powershell -File tests/host/run.ps1` (needs gcc or clang) |
+| Unit tests (ztest) | **25** | `proxy_core` logic: hooks, identity derivation, advertising/forwarding predicates, send policy | `.\scripts\test_docker.ps1` — see below |
+| Integration tests (ztest) | **8** | The real `src/uart_bridge.c` against an emulated UART: ring flow, TX chaining, the SPSC drain | `.\scripts\test_docker.ps1` — see below |
+| Config / script tests | **36** | Each deliberately breaks one build invariant and asserts the check goes red | `python scripts/test_check_configs.py`<br>`python scripts/test_assert_tests_ran.py` |
+| Build matrix | 6 configs | All six board configurations compile, with flash offsets, Partition Manager off, async-UART gating and `prod.conf` invariants asserted | `.\build.ps1` then `python scripts/check_configs.py <target>` |
+
+### Running the `native_sim` suites locally
+
+The ztest tiers need Zephyr's **`native_sim`** board, which is **Linux-only**. Rather than
+requiring WSL, there is a Docker runner that uses the same toolchain image as CI — so a green
+run locally means what a green run in CI means:
+
+```powershell
+.\scripts\test_docker.ps1            # unit + integration suites
+.\scripts\test_docker.ps1 -Fresh     # discard the cached NCS workspace first
+```
+
+```bash
+./scripts/test_docker.sh             # Linux / macOS
+```
+
+It needs only Docker — **not** a local NCS install, since the container carries the toolchain.
+The workspace is cached in a named docker volume, so the first run is slow (`west update`
+pulls several GB) and later runs are not. *(Newly added and not yet executed on real hardware
+— see the note in [`TESTING.md`](TESTING.md) §2.)*
 
 The config checker takes target names plus optional `--proj` / `--build-dir`; the build
-directory is *not* a positional argument. It has its own test suite, which needs no SDK:
-`python scripts/test_check_configs.py`.
+directory is *not* a positional argument.
 
-Hardware behaviour (pairing dialogs, reconnect, throughput) is still verified by hand; see
-[`ADD_TESTING_PLAN.md`](ADD_TESTING_PLAN.md) for the full plan, the test IDs, and what is
-deliberately out of scope.
+Hardware behaviour (pairing dialogs, reconnect, throughput, relay switching) is still verified
+by hand. See [`TESTING.md`](TESTING.md) for what each tier covers case by case, what makes a
+failure actually fail the build, and the honest list of what is *not* tested.
 
 ## Logging
 

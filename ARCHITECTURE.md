@@ -3,7 +3,7 @@
 Review date: 2026-07-16. Scope: whole repository — `src/main.c`, `prj.conf`, `prod.conf`,
 `boards/*`, `CMakeLists.txt`, `build.ps1`/`build.sh`, docs. This document is the
 *descriptive* architecture reference plus an assessment; the actionable follow-ups it
-feeds live in `ADD_TESTING_PLAN.md` (testing/CI) and `TODO_ARCHITECTURE.md` (code tasks).
+feeds live in `TESTING.md` (testing/CI) and `TODO_ARCHITECTURE.md` (code tasks).
 `CLAUDE.md` remains the build-environment/gotcha reference; where they overlap, this file
 describes *what the system is*, CLAUDE.md describes *how to work on it*.
 
@@ -50,7 +50,7 @@ generic clients (nRF Connect / nRF Toolbox) work for debugging.
 | `CLAUDE.md`, `README.md`, `PAIRING_PLAN.md`, `TODO.md`, `TODO_ARCHITECTURE.md` | Docs: deep build reference, user-facing overview, pairing design, review/task backlogs. |
 
 There is no test suite and no CI (as of this review) — that is what
-`ADD_TESTING_PLAN.md` addresses.
+`TESTING.md` addresses.
 
 ## 3. Execution contexts
 
@@ -151,7 +151,7 @@ States (conceptually): `ADVERTISING_FAST` → (30 s, `adv_slow_work`) →
 `advertising_start()`.
 
 The three hard-won invariants (each fixed a real field bug — regression-protect these
-first, see `ADD_TESTING_PLAN.md`):
+first, see `TESTING.md`):
 
 1. **Advertising restarts from the `recycled` callback, never from `disconnected`.**
    Inside `on_disconnected` the conn object is still allocated; with
@@ -284,12 +284,12 @@ per-board `.conf` fragments.
    that automation catches cheaply: config regressions (PM/0x0 link, `-ENOSYS` async
    gating, prod.conf stripping) and event-ordering state-machine bugs
    (recycled/`-EALREADY`). Every invariant in §5 and §7 is currently protected only
-   by comments. → `ADD_TESTING_PLAN.md`.
+   by comments. → `TESTING.md`.
 2. **Monolithic `main.c`** (~1080 lines, all logic static): fine at this size for
    reading, but it makes the pure logic (hooks, identity derivation, state-machine
    predicates, chunking policy) untestable without extraction, and couples the UART
    data path to BT headers. → planned `proxy_core`/`uart_bridge` extraction
-   (`ADD_TESTING_PLAN.md` Phase 2/4, `TODO_ARCHITECTURE.md` Task 6).
+   (`TESTING.md`, `TODO_ARCHITECTURE.md` Task 6).
 3. **Hook execution context**: the serial-side extension point runs in ISR context —
    a trap for the very extension work the hooks exist for. (Task 6a.)
 4. **Known open defects**: permanent UART-RX death if the `UART_RX_DISABLED` recovery
