@@ -204,9 +204,11 @@ generically, here.
 | `state` | read, notify | `BT_GATT_PERM_READ_ENCRYPT` | `[version][lock_state][reason][flags]` |
 | `telemetry` | notify | `BT_GATT_PERM_READ_ENCRYPT` | reserved for workstream D |
 
-Opcodes: `0x01 UNLOCK`, `0x02 LOCK`, `0x03 SET_AUTO_UNLOCK(bool)`, `0x04 GET_STATE`. A leading
-version byte so the app and firmware can disagree gracefully; unknown opcode or wrong version
-→ rejected with an error response, never silently ignored.
+Opcodes: `0x01 UNLOCK`, `0x02 LOCK`, `0x03 SET_AUTO_UNLOCK(bool)`, `0x04 GET_STATE`,
+`0x05 SET_PROTOCOL(id)` — the last one belongs to `PROTOCOL_PLAN.md` A4, which needs the app to
+be authoritative about which controller protocol is on the wire, and this is the channel for it.
+A leading version byte so the app and firmware can disagree gracefully; unknown opcode or wrong
+version → rejected with an error response, never silently ignored.
 
 `BT_GATT_PERM_*_ENCRYPT` requires security level 2, which Just Works pairing satisfies — see
 `FEATURE_PLAN.md` §3 D1 for why this differs from the `CONFIG_BT_NUS_AUTHEN` trap. Keep the
@@ -308,6 +310,11 @@ serialisation only — the settings backend is Zephyr).
 `SET_AUTO_UNLOCK`, loaded at boot. **The lock state itself is never written** — assert this in
 review; it is the one line that would quietly undo the feature.
 
+This handler is also where `PROTOCOL_PLAN.md` A4 persists the selected controller protocol
+(`nrfproxy/protocol`). Same mechanism, same commit if the two land together; the protocol
+choice *is* persisted, unlike the lock state, because re-detecting on every boot is exactly
+what selecting it explicitly was meant to avoid.
+
 `bond_reset_requested()` wipes the pairing; decide whether it also clears preferences.
 **Recommendation: yes** — a factory reset that leaves the previous owner's auto-unlock enabled
 is a surprise, and the next phone to pair inherits it.
@@ -339,8 +346,9 @@ as it is completed. Nothing in B ships to a rider before this is signed off.
 
 **On the bike, wheel off the ground, then a low-speed ride:**
 - [ ] Locked: motor does not assist. Unlocked: normal assist.
-- [ ] Confirm the display behaves sanely in the locked state (some controllers report a fault
-      when the enable line is open — worth knowing before a rider sees it).
+- [ ] Confirm the controller behaves sanely in the locked state, and that the app (which is the
+      display) renders that state sensibly — some controllers report a fault when the enable
+      line is open, and the rider should see something intelligible rather than an error code.
 - [ ] Ride with the phone in a pocket, screen off, for 10+ minutes: no spurious relock, no
       assist interruption. **This is the test that matters most**; a false relock under load is
       the one failure mode with a safety dimension.
