@@ -62,11 +62,6 @@ apps.
   arithmetic for the ISR-safe counters plus the "should a periodic report fire" predicate.
   The counters are bumped in the UART ISR and reported from `ble_write_thread`. **Pure
   logic, no Zephyr** — host-tested.
-- `src/security_timeout.h` — a lone `SECURITY_TIMEOUT_MS` (60000) constant. ⚠ **Currently
-  orphaned:** nothing under `src/` includes it, and the firmware's actual watchdog window is
-  `PROXY_SECURITY_WINDOW_MS` in `proxy_core.h`. Its only consumer is
-  `tests/host/test_security_timeout.c`, so that test pins a constant no firmware code reads.
-  Either wire it up as the single definition or delete both — see `TODO.md`.
 - `CMakeLists.txt` — standard Zephyr app boilerplate; compiles `src/main.c`,
   `src/proxy_core.c`, `src/uart_bridge.c`, `src/uart_rx_retry.c` and `src/drop_stats.c`.
 - `README.md` — user-facing overview: supported-board table, how to run the `build.ps1`/

@@ -35,9 +35,13 @@ test scaffold; 6 is a refactor to do *before* hook logic lands; 7–8 are cleanu
 - ✅ **Task 1** — done (docs only). `PAIRING_PLAN.md` §7 req 1 rewritten for the
   `createBond()` flow + Android 14 `RECEIVER_EXPORTED` note; status line corrected.
 - ✅ **Task 2** — done. Collapsed `SECURITY_TIMEOUT_LOCKED`/`_PAIRING` into a single
-  `SECURITY_TIMEOUT` (60 s) via `src/security_timeout.h` (`SECURITY_TIMEOUT_MS`);
-  docs updated (CLAUDE/README/PAIRING_PLAN §5+§6/ARCHITECTURE); host test under
-  `tests/host/`. NCS not on this machine — firmware compile-verify deferred.
+  60 s window; docs updated (CLAUDE/README/PAIRING_PLAN §5+§6/ARCHITECTURE).
+  *(Corrected 2026-07-29: this entry used to credit `src/security_timeout.h`
+  (`SECURITY_TIMEOUT_MS`) and a host test on it. That header was never included
+  by anything under `src/` — the firmware's window is `PROXY_SECURITY_WINDOW_MS`
+  in `proxy_core.h`, reached through `proxy_security_window_ms()`. The orphan and
+  its test were deleted; the flat-window property is asserted against the real
+  function in `tests/unit/policy` and `tests/host/test_proxy_core.c`.)*
 - ✅ **Task 3** — done. `uart_rx_retry_work` retries failed `UART_RX_DISABLED`
   restarts; `-EBUSY` treated as success; once-per-outage `LOG_WRN`. Policy in
   `src/uart_rx_retry.c` with host tests. NCS compile-verify deferred.

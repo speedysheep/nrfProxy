@@ -169,11 +169,11 @@ inside Nordic's pinned toolchain container (`ghcr.io/nrfconnect/sdk-nrf-toolchai
 which materialises an NCS workspace and builds this repo as an out-of-tree application —
 the same flow as the wrapper scripts, just automated.
 
-**121 automated test cases across four tiers**, all of which gate CI:
+**118 automated test cases across four tiers**, all of which gate CI:
 
 | Tier | Cases | What it protects | Run it locally |
 |------|-------|------------------|----------------|
-| Host unit checks | **52** | Every Zephyr-free module — `proxy_core`, `drop_stats`, `uart_rx_retry`. The only tier that runs natively on Windows | `powershell -File tests/host/run.ps1` (needs gcc or clang) |
+| Host unit checks | **49** | Every Zephyr-free module — `proxy_core`, `drop_stats`, `uart_rx_retry`. The only tier that runs natively on Windows | `powershell -File tests/host/run.ps1` (needs gcc or clang) |
 | Unit tests (ztest) | **25** | `proxy_core` logic: hooks, identity derivation, advertising/forwarding predicates, send policy | `.\scripts\test_docker.ps1` — see below |
 | Integration tests (ztest) | **8** | The real `src/uart_bridge.c` against an emulated UART: ring flow, TX chaining, the SPSC drain | `.\scripts\test_docker.ps1` — see below |
 | Config / script tests | **36** | Each deliberately breaks one build invariant and asserts the check goes red | `python scripts/test_check_configs.py`<br>`python scripts/test_assert_tests_ran.py` |

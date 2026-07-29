@@ -6,7 +6,7 @@ it claimed nothing had ever been built or run, which stopped being true once CI 
 file describes what the project actually has, with counts taken by reading the suites rather
 than quoted from memory.
 
-**Headline: 121 automated test cases across four tiers, all gating CI.**
+**Headline: 118 automated test cases across four tiers, all gating CI.**
 
 ---
 
@@ -14,7 +14,7 @@ than quoted from memory.
 
 | Tier | Where | Cases | Needs | Runs in CI |
 |------|-------|-------|-------|-----------|
-| **Host** | `tests/host/` | **52** | a C compiler | `lint` job |
+| **Host** | `tests/host/` | **49** | a C compiler | `lint` job |
 | **Unit (ztest)** | `tests/unit/{hooks,identity,policy}/` | **25** | NCS + `native_sim` | `unit-tests` job |
 | **Integration (ztest)** | `tests/integration/uart_bridge/` | **8** | NCS + `native_sim` | `integration` job |
 | **Config/script** | `scripts/test_*.py` | **36** | python3 only | `lint` job |
@@ -24,7 +24,7 @@ project's history is dominated by configuration faults (the Partition Manager `0
 the `-ENOSYS` async-UART trap), so "does it still build correctly for every board" catches a
 class of defect no unit test can.
 
-### Host — `tests/host/` (52 cases)
+### Host — `tests/host/` (49 cases)
 
 Plain C compiled with gcc/clang, no Zephyr, no board, no SDK. **The only tier that runs
 natively on the Windows dev box**, and therefore the fast inner loop.
@@ -33,9 +33,9 @@ natively on the Windows dev box**, and therefore the fast inner loop.
 powershell -File tests/host/run.ps1     # ~2 seconds
 ```
 
-Covers `proxy_core` (hooks, identity derivation, advertising/forwarding predicates, NUS chunk
-sizing, send-error classification), `drop_stats`, `uart_rx_retry`, and the security-timeout
-constant.
+Covers `proxy_core` (hooks, identity derivation, advertising/forwarding predicates, the flat
+security window, NUS chunk sizing, send-error classification), `drop_stats` and
+`uart_rx_retry`.
 
 **`drop_stats` and `uart_rx_retry` have no other unit-level coverage.** The integration suite
 links both modules but exercises them through `uart_bridge` rather than asserting on their
@@ -85,7 +85,7 @@ Stdlib `unittest`, no SDK.
 ### Locally on Windows — no container needed
 
 ```powershell
-powershell -File tests/host/run.ps1                    # 52 host cases
+powershell -File tests/host/run.ps1                    # 49 host cases
 python scripts/test_check_configs.py                   # config-checker tests
 python scripts/test_assert_tests_ran.py                # guard tests
 .\build.ps1                                            # six-config build matrix
@@ -132,7 +132,7 @@ directories back to the checkout owner afterwards. Both suites run even if the f
 Two holes were found and closed on 2026-07-29; both were tests that *could not fail the build*
 rather than assertions that were wrong.
 
-1. **`tests/host/` ran nowhere in CI.** 52 cases gated nothing. Now in the `lint` job.
+1. **`tests/host/` ran nowhere in CI.** The entire tier gated nothing. Now in the `lint` job.
 2. **A zero-test run passed silently.** `west twister` exits 0 when it runs nothing, so a
    mistyped `-T` path, a renamed suite directory, or a `testcase.yaml` that stopped matching
    the platform filter would all have reported success. `scripts/assert_tests_ran.py` now
@@ -180,13 +180,27 @@ Honest list. Nothing here is an accident.
 | **Hardware behaviour** — pairing dialogs, real throughput, LED states, relay switching, actual boards | No hardware in CI, by choice | No; stays a manual checklist |
 | **Power consumption** | Needs instrumentation | No |
 
-### Known defect in the suite itself
+### A test that proved nothing — removed 2026-07-29
 
-`src/security_timeout.h` defines `SECURITY_TIMEOUT_MS = 60000`, and **nothing under `src/`
-includes it** — the firmware's watchdog window is `PROXY_SECURITY_WINDOW_MS` in
-`proxy_core.h`. Its only consumer is `tests/host/test_security_timeout.c`, so that test pins a
-constant no firmware code reads: it passes while proving nothing. Either wire the header up as
-the single definition or delete both.
+Recorded because the failure mode is worth recognising, not because it still exists.
+
+`src/security_timeout.h` defined `SECURITY_TIMEOUT_MS = 60000` and **nothing under `src/`
+included it** — the firmware's watchdog window is `PROXY_SECURITY_WINDOW_MS` in `proxy_core.h`,
+reached through `proxy_security_window_ms()`. The header's only consumer was
+`tests/host/test_security_timeout.c`, so that test pinned a constant no firmware code read: it
+passed while proving nothing, and would have kept passing had the real window been changed to
+anything at all.
+
+Both were deleted. Nothing was lost: the property the test was protecting — that the locked and
+pairing windows stay collapsed into one, after a split window caused Android to report
+"couldn't pair: incorrect PIN" — is asserted against the **real** function in
+`tests/unit/policy` (`proxy_security_window_ms(true) == proxy_security_window_ms(false)`, plus
+a floor of 30 s) and in `tests/host/test_proxy_core.c`. Those catch a reintroduced split
+however it is spelled, where the deleted test only checked that two specific macro names were
+absent from a file nobody included.
+
+**The general lesson:** a test that imports its expected value from a header the production
+code does not use is testing itself. Check what `src/` actually includes.
 
 ---
 
