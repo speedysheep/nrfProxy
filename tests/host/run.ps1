@@ -19,7 +19,10 @@ function Invoke-HostTest($name, $sources) {
     $exe = "$name.exe"
     & $cc.Source -O0 -Wall -Wextra -o $exe @sources
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & ".\$exe"
+    # Join-Path, not ".\$exe": backslash is not a path separator for PowerShell
+    # on Linux, and this script now runs in CI on ubuntu as well as on Windows.
+    # The .exe suffix is meaningless there but harmless.
+    & (Join-Path $here $exe)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
@@ -32,11 +35,11 @@ Invoke-HostTest "test_drop_stats" @(
     "test_drop_stats.c",
     (Join-Path $src "drop_stats.c")
 )
-# proxy_core needs -I for security_timeout.h
+# -I$src so the suite can include proxy_core.h by name.
 & $cc.Source -O0 -Wall -Wextra "-I$src" -o test_proxy_core.exe `
     test_proxy_core.c (Join-Path $src "proxy_core.c")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& .\test_proxy_core.exe
+& (Join-Path $here "test_proxy_core.exe")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "all host tests passed"

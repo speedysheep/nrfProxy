@@ -53,6 +53,22 @@ jobs:
       - name: Test the config checker
         run: python3 scripts/test_check_configs.py
 
+      # assert_tests_ran.py gates both twister jobs, so it gets the same
+      # treatment as the config checker: a guard that is itself unverified is
+      # the false assurance it exists to prevent.
+      - name: Test the "did the tests actually run" guard
+        run: python3 scripts/test_assert_tests_ran.py
+
+      # The host suites are the only coverage drop_stats and uart_rx_retry have
+      # as *units* (the integration suite links them, but exercises them through
+      # uart_bridge rather than asserting on their policy functions). They need
+      # nothing but a C compiler, so there is no reason for them to have been
+      # Windows-only -- until now they ran nowhere in CI, leaving 52 of the
+      # project's test cases gating nothing.
+      - name: Run the host unit checks
+        shell: pwsh
+        run: ./tests/host/run.ps1
+
   build-matrix:
     name: build ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -115,6 +131,14 @@ jobs:
         working-directory: ncs
         run: west twister -T "$GITHUB_WORKSPACE/nrfProxy/tests/unit" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
 
+      # Guards the false green: Twister exits 0 when it runs *nothing*, so a
+      # mistyped -T path or a suite that stops matching the platform filter
+      # would look like success. The floor is deliberately below the current
+      # count (25) so adding tests never breaks the build, but losing a whole
+      # suite does.
+      - name: Assert the unit suites actually ran
+        run: python3 nrfProxy/scripts/assert_tests_ran.py twister-out/twister.xml --min 20
+
       - name: Upload the test report
         if: always()
         uses: actions/upload-artifact@v7
@@ -146,6 +170,10 @@ jobs:
       - name: Run the uart_bridge suite
         working-directory: ncs
         run: west twister -T "$GITHUB_WORKSPACE/nrfProxy/tests/integration" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
+
+      # Same false-green guard as the unit job; floor set below the current 8.
+      - name: Assert the integration suite actually ran
+        run: python3 nrfProxy/scripts/assert_tests_ran.py twister-out/twister.xml --min 6
 
       - name: Upload the test report
         if: always()
