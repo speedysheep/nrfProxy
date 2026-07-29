@@ -10,3 +10,7 @@ tests/host/*.o
 twister-out/
 twister-out.*/
 twister-out-*/
+
+# Python bytecode from the stdlib test suites in scripts/
+__pycache__/
+*.pyc
