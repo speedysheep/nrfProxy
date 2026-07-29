@@ -11,9 +11,9 @@ four workstreams; each has its own detail document with the individually-commita
 | **D** | Remote diagnostics / telemetry to the app | [`TELEMETRY_PLAN.md`](TELEMETRY_PLAN.md) | Health/debug snapshots over BLE, compiled out or idle when unused |
 
 Workstream A was not on the spoken list of three, but it is the load-bearing one: **the
-firmware as built today is a one-UART tap (UART1 ⇄ BLE), and three of the four features
-assume it sits between the controller and the display.** See §2. If you only wanted a tap,
-say so and A shrinks to A1 + A5.
+firmware as built today is a one-UART serial↔BLE bridge (UART1 ⇄ BLE), and three of the four
+features assume it sits between the controller and the display.** See §2. If you only wanted
+the bridge plus message parsing, say so and A shrinks to A1 + A5.
 
 ---
 
@@ -39,8 +39,21 @@ From `CLAUDE.md` and the existing plans; nothing below may violate these:
 
 ## 2. The architectural finding that shapes the ordering
 
-**Today:** `uart1` ⇄ ring buffers ⇄ BLE NUS. One serial port. The proxy is a *tap or an
-endpoint*, not an intermediary.
+**Today:** `uart1` ⇄ ring buffers ⇄ BLE NUS. One serial port. This is a **serial ⇄ Bluetooth LE
+bridge** — it translates between two different transports, so the serial peer and the phone are
+its two *endpoints*. It is not an intermediary between two serial peers, and no byte received
+on a UART is ever written back out to a UART.
+
+Worth naming precisely, because the words get used loosely and the distinction drives this
+workstream:
+
+- **Bridge / gateway** *(what it is today)* — joins two different transports and translates.
+  Serial on one side, BLE GATT on the other; the two endpoints could never talk directly.
+- **Proxy** *(what workstream A makes it)* — an intermediary between two endpoints of the
+  **same** protocol, relaying on behalf of each, ideally transparently. That is precisely the
+  controller ⇄ display role, so the project's name becomes literally accurate once A4 lands.
+- **Tap / sniffer** — passive, listen-only, carries nothing. This firmware is *not* one, in any
+  configuration; it is fully bidirectional to the phone.
 
 **What features A/C need:** controller TX → proxy RX, proxy TX → display RX, and the reverse
 for the display's replies. That is **two UARTs**, and the nRF52840 has exactly two UARTE

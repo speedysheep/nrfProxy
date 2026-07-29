@@ -1,8 +1,12 @@
 # MITM_PLAN.md — Workstream A: controller ⇄ display datapath
 
-Part of [`FEATURE_PLAN.md`](FEATURE_PLAN.md). Turns the firmware from a one-UART tap into a
-true intermediary between the motor controller and the display, and gives it message
-boundaries to work with.
+Part of [`FEATURE_PLAN.md`](FEATURE_PLAN.md). Turns the firmware from a one-UART serial ⇄
+Bluetooth LE bridge into a true intermediary between the motor controller and the display, and
+gives it message boundaries to work with.
+
+(Terminology, since it drives the whole workstream: today the firmware is a **bridge** — two
+different transports, two endpoints, translation between them. What A4 makes it is a **proxy**
+— an intermediary between two endpoints of the *same* protocol. See `FEATURE_PLAN.md` §2.)
 
 **Blocks:** workstream C entirely, and the parts of D that report protocol health.
 **Independent of:** workstream B (locking).
@@ -49,9 +53,10 @@ numbers are a gate on A4's design**, not just documentation.
 today, and everything with a message boundary in it (A5, all of C, parts of D) is guesswork
 until it is done.
 
-**How:** the existing single-UART build is already a tap. Wire the controller's TX to the
-board's UART1 RX (common ground, 115200 or whatever the bike uses), connect the phone, and
-record the NUS stream. Repeat with the *display's* TX to capture the other direction. Both
+**How:** use the existing single-UART build as-is — it already forwards everything it receives
+to the phone, which is all a capture needs. Wire the controller's TX to the board's UART1 RX
+(common ground, 115200 or whatever the bike uses), connect the phone, and record the NUS
+stream. Repeat with the *display's* TX to capture the other direction. Both
 directions matter: which side initiates tells you whether the link is polled or free-running,
 and that decides A4's latency budget.
 
