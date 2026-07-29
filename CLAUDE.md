@@ -5,11 +5,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this project is
 
 `nrfProxy` is a Zephyr / nRF Connect SDK application that bridges a serial UART to a
-phone over Bluetooth LE, acting as a **bidirectional proxy**:
+phone over Bluetooth LE — a **bidirectional serial ⇄ Bluetooth LE bridge**:
 
 - **Serial → phone:** bytes received on UART1 are forwarded as BLE notifications via the
   Nordic UART Service (NUS).
 - **Phone → serial:** bytes written to the NUS RX characteristic are sent out UART1.
+
+*Not* a proxy, despite the name: a proxy is an intermediary between two endpoints of the
+**same** protocol, whereas this translates between two **different** transports — the serial
+peer and the phone could never talk directly. The name is historical. It is also not a tap:
+a tap is passive, and both directions here are live (the phone→serial direction commands the
+device on the other end of the UART).
 
 Supported boards (each has its own overlay in `boards/`): **nRF52840 DK**
 (`nrf52840dk/nrf52840`), **Seeed XIAO BLE** (`xiao_ble/nrf52840`), the
@@ -67,6 +73,27 @@ apps.
 - `ADD_TESTING_PLAN.md` — the testing/CI plan, its findings log, and what is deliberately
   *not* covered (bsim/Phase 5, and the E4/E5/E6 gaps). `ARCHITECTURE.md` — the system as
   built, plus the testability analysis.
+- `PAIRING_PLAN.md` — design of the bond-to-first-phone pairing lock (filter accept list,
+  encryption gate, security watchdog, bond-reset button). Implemented; see "Pairing lock"
+  under Conventions.
+- **The e-bike feature programme** — planned work, not yet implemented. `FEATURE_PLAN.md`
+  is the master checklist and the entry point: it holds the topology, the decisions taken
+  and why, the dependency graph, the ordering, and the findings log. **Read it before
+  starting any of the four workstreams**, whose detail lives in:
+  - `PROTOCOL_PLAN.md` — **A**: capture the motor-controller protocols (four of them, at
+    different baud rates), parse them into messages (`frame.c`), and select the right one
+    at runtime. Also records the resource budget (CPU/flash/RAM headroom).
+  - `LOCK_PLAN.md` — **B**: motor-enable relay locking, gated on the app being connected
+    and the link encrypted. Carries the lock state table, which is the specification.
+  - `INTERCEPT_PLAN.md` — **C**: enriching the uplink with extra sensor data, and
+    validating every command sent down to the controller.
+  - `TELEMETRY_PLAN.md` — **D**: diagnostics to the app, compiled out or idle when unused.
+
+  Topology worth knowing before reading any of them: **the Android app is the display** —
+  `Motor → Controller → nRF52840 UART1 → BLE NUS → Android app`. There is no physical
+  display in the serial chain, so one UART is the correct and sufficient design.
+- `TODO.md` — code-review findings ranked by severity, with what was fixed.
+  `TODO_ARCHITECTURE.md` — architecture-review follow-up tasks and their progress.
 - `.mcp.json` — Memfault MCP server config (unrelated to firmware).
 
 **Testing:** `native_sim` is Linux-only, so the ztest suites run in CI (or WSL), not on the

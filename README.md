@@ -103,13 +103,13 @@ configuration.
 |------|---------|----------------------|-----------|----------------------|
 | NCS toolchain dir (e.g. `…/toolchains/936afb6332`) | Windows: `C:\ncs\toolchains\936afb6332`; Bash: unset (uses an already-activated env) | `-Toolchain` | `--toolchain` | `NRFPROXY_TOOLCHAIN` |
 | NCS workspace (the `vX.Y.Z` dir) | `C:\ncs\v3.3.1` / `~/ncs/v3.3.1` | `-Ncs` | `--ncs` | `NRFPROXY_NCS` |
+| This project | the script's own directory | `-Proj` | `--proj` | `NRFPROXY_PROJ` |
 
 The defaults are just the *standard* install paths — the SDK does not have to live on C:, and
 putting it elsewhere needs no change to these scripts (set `NRFPROXY_NCS` /
 `NRFPROXY_TOOLCHAIN` once and `.\build.ps1` works unqualified). See
 [`CLAUDE.md`](CLAUDE.md) for installing to another drive, and for the two Windows traps that
 come with it: cross-drive `west build` and the 260-character path limit.
-| This project | the script's own directory | `-Proj` | `--proj` | `NRFPROXY_PROJ` |
 
 ```powershell
 # Windows: override per run via parameters…
@@ -172,13 +172,19 @@ the same flow as the wrapper scripts, just automated.
 | Layer | What it protects | Run it locally |
 |-------|------------------|----------------|
 | Build matrix | All six configurations compile | `.\build.ps1` / `./build.sh` |
-| Config assertions | Flash offsets, Partition Manager stays off, async-UART gating, `prod.conf` not stripping the pairing lock | `python scripts/check_configs.py <target> <build dir>` |
-| Unit tests | The pure logic in `src/proxy_core.c` (hooks, identity derivation, advertising/send policy) | `west twister -T app/tests/unit -p native_sim` |
-| Integration tests | The UART data path in `src/uart_bridge.c` (ring flow, TX chaining, RX recovery) | `west twister -T app/tests/integration -p native_sim` |
+| Config assertions | Flash offsets, Partition Manager stays off, async-UART gating, `prod.conf` not stripping the pairing lock | `python scripts/check_configs.py <target>` (after building that target) |
+| Host unit checks | The pure logic that needs no SDK — `proxy_core`, `drop_stats`, `uart_rx_retry`, the security-timeout policy | `powershell -File tests/host/run.ps1` (needs gcc or clang) |
+| Unit tests | The pure logic in `src/proxy_core.c` (hooks, identity derivation, advertising/send policy) | `west twister -T tests/unit -p native_sim` |
+| Integration tests | The UART data path in `src/uart_bridge.c` (ring flow, TX chaining, RX recovery) | `west twister -T tests/integration -p native_sim` |
+| Build-only matrix | The repo-root [`testcase.yaml`](testcase.yaml), run from an NCS workspace | `west twister -T <this repo> …` |
 
 Unit and integration tests run on Zephyr's **`native_sim`** board, which is **Linux-only** —
-on a Windows development machine run them under WSL or let CI run them; the firmware build
-matrix is the part that runs natively on Windows.
+on a Windows development machine run them under WSL or let CI run them. The build matrix and
+the **host unit checks** are the parts that run natively on Windows.
+
+The config checker takes target names plus optional `--proj` / `--build-dir`; the build
+directory is *not* a positional argument. It has its own test suite, which needs no SDK:
+`python scripts/test_check_configs.py`.
 
 Hardware behaviour (pairing dialogs, reconnect, throughput) is still verified by hand; see
 [`ADD_TESTING_PLAN.md`](ADD_TESTING_PLAN.md) for the full plan, the test IDs, and what is
@@ -239,19 +245,3 @@ Zephyr auto-merges on top of `prj.conf`:
 For a logging-free **production** build on the XIAO (or Pro Micro), layer
 [`prod.conf`](prod.conf) on top via `EXTRA_CONF_FILE` — the `xiao_prod` / `promicro_prod` wrapper targets do this for you.
 
-## Testing
-
-[![CI](https://github.com/OWNER/nrfProxy/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/nrfProxy/actions/workflows/ci.yml)
-
-*(Replace `OWNER` with the GitHub org/user once the remote is set.)*
-
-- **Config regression** (no NCS required for the checker itself): after a local
-  `.\build.ps1 <target>`, run
-  `python scripts/check_configs.py <target> build_<dir>` — asserts flash offsets,
-  `CONFIG_UART_1_ASYNC`, pairing Kconfig, prod-strip invariants, and no
-  `partitions.yml`. Self-test: `python scripts/check_configs.py --self-test`.
-- **Host unit checks** (gcc): `powershell -File tests/host/run.ps1`.
-- **Twister build-only matrix**: repo-root [`testcase.yaml`](testcase.yaml) — run from
-  an NCS workspace once the toolchain is available (`west twister -T <this-repo> …`).
-- Broader plan (CI container, `proxy_core` ztests, BabbleSim): [`ADD_TESTING_PLAN.md`](ADD_TESTING_PLAN.md).
-  Unit tests on `native_sim` are intended for CI/WSL, not bare Windows.
