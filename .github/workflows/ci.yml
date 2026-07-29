@@ -22,7 +22,7 @@ defaults:
   run:
     shell: bash
 
-# Job graph (see ADD_TESTING_PLAN.md):
+# Job graph (see TESTING.md):
 #   lint          — shell/script linting, no SDK needed
 #   build-matrix  — the six firmware configs + config assertions   (Phase 1)
 #   unit-tests    — twister, native_sim ztest suites               (Phase 3)

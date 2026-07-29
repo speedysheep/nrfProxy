@@ -216,13 +216,13 @@ commit message — is in the per-workstream docs.
   road.** The interception layer is built for display/data purposes; what you put through it is
   your call, but nothing in this plan does that, and road-legality is a question for you rather
   than something the firmware should decide.
-- BabbleSim end-to-end BLE tests (already deliberately deferred — `ADD_TESTING_PLAN.md` Phase 5).
+- BabbleSim end-to-end BLE tests (already deliberately deferred — `TESTING.md` §5).
 - Flash readback protection / APPROTECT (`CLAUDE.md`: not wanted, project is open-sourcing).
 - OTA/DFU firmware update. Worth its own plan later; not in these four.
 
 ## 10. Findings log
 
-Filled in as tasks land — same convention as `ADD_TESTING_PLAN.md`. Record anything that
+Filled in as tasks land. Record anything that
 contradicted an assumption above, so the plan stays honest.
 
 | Date | Task | Finding |

@@ -88,9 +88,11 @@ apps.
 - `.github/workflows/ci.yml` + `.github/actions/setup-ncs/` — CI: lint, the six-config build
   matrix with the assertions above, and both native_sim suites, in Nordic's pinned toolchain
   container. `.github/dependabot.yml` — github-actions bumps only.
-- `ADD_TESTING_PLAN.md` — the testing/CI plan, its findings log, and what is deliberately
-  *not* covered (bsim/Phase 5, and the E4/E5/E6 gaps). `ARCHITECTURE.md` — the system as
-  built, plus the testability analysis.
+- `TESTING.md` — **what is actually tested**: the four tiers and their verified case counts,
+  how to run each (including the Docker runner for the `native_sim` suites), what makes a
+  failure fail the build, and an honest list of what is *not* covered. Replaced
+  `ADD_TESTING_PLAN.md`, whose status section had gone badly stale.
+  `ARCHITECTURE.md` — the system as built, plus the testability analysis.
 - `PAIRING_PLAN.md` — design of the bond-to-first-phone pairing lock (filter accept list,
   encryption gate, security watchdog, bond-reset button). Implemented; see "Pairing lock"
   under Conventions.
