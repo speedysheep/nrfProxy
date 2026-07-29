@@ -54,11 +54,29 @@ apps.
   `_uf2` suffix — naming them `promicro_nrf52840_nrf52840.*` (no variant) is silently
   ignored and the overlay won't apply (uart1 stays disabled → `DEVICE_DT_GET` build
   error). The XIAO/DK have no variant, hence no suffix.
+- `src/uart_rx_retry.c` / `src/uart_rx_retry.h` — the async-RX recovery policy (`TODO.md`
+  M2): when `UART_RX_DISABLED` fails to re-enable, a delayed work item retries until it
+  succeeds, with `-EBUSY` counted as success (another path already re-enabled). **Pure
+  logic, no Zephyr** — host-tested.
+- `src/drop_stats.c` / `src/drop_stats.h` — silent-drop accounting (`TODO.md` L1): the
+  arithmetic for the ISR-safe counters plus the "should a periodic report fire" predicate.
+  The counters are bumped in the UART ISR and reported from `ble_write_thread`. **Pure
+  logic, no Zephyr** — host-tested.
+- `src/security_timeout.h` — a lone `SECURITY_TIMEOUT_MS` (60000) constant. ⚠ **Currently
+  orphaned:** nothing under `src/` includes it, and the firmware's actual watchdog window is
+  `PROXY_SECURITY_WINDOW_MS` in `proxy_core.h`. Its only consumer is
+  `tests/host/test_security_timeout.c`, so that test pins a constant no firmware code reads.
+  Either wire it up as the single definition or delete both — see `TODO.md`.
 - `CMakeLists.txt` — standard Zephyr app boilerplate; compiles `src/main.c`,
-  `src/proxy_core.c` and `src/uart_bridge.c`.
+  `src/proxy_core.c`, `src/uart_bridge.c`, `src/uart_rx_retry.c` and `src/drop_stats.c`.
 - `README.md` — user-facing overview: supported-board table, how to run the `build.ps1`/
   `build.sh` wrappers, flashing, and the per-board Kconfig-fragment list. This file
   (`CLAUDE.md`) stays the deep reference (build-env setup, flash offsets, gotchas).
+- `tests/host/` — plain-gcc unit checks for the Zephyr-free modules (`proxy_core`,
+  `drop_stats`, `uart_rx_retry`, the security-timeout constant). **The only suites that run
+  natively on the Windows dev box** — no SDK, no `native_sim`, no WSL: run
+  `powershell -File tests/host/run.ps1` (needs `gcc` or `clang` on PATH). This is the fast
+  inner loop for pure logic; put new Zephyr-free modules here first.
 - `tests/unit/{hooks,identity,policy}/` — ztest suites for `proxy_core`, run on
   `native_sim`. They compile `src/proxy_core.c` straight in; no BLE stack, no board.
 - `tests/integration/uart_bridge/` — ztest suite driving the real `src/uart_bridge.c`
