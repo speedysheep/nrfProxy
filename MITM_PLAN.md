@@ -279,8 +279,9 @@ No code is scheduled here; it is listed so the decision is explicit rather than 
 
 ## Open items for this workstream
 
-- Q1 (which protocol) and Q2 (two wires or one shared half-duplex line) — A1 answers both. If
-  the link turns out to be **half-duplex on a single wire**, A2/A3/A4 change shape considerably
-  (one UART with direction control, or a single-wire tap plus injection), so treat A1's answer
-  as a gate before starting A2.
+- ~~Q2~~ **answered 2026-07-28: two wires, full duplex.** The two-UART design below is correct
+  as written — no direction control, no single-wire tap-plus-injection variant needed. A2 is
+  therefore **no longer gated on A1** and can run in parallel with the protocol capture.
+- Q1 (which protocol) is still open and A1 answers it. It gates A5 (framing) and all of
+  workstream C, but not A2/A3/A4 — the datapath refactor is protocol-agnostic.
 - The A1 latency numbers gate A4's fan-out design (see the fan-out constraint above).

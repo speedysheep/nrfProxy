@@ -112,7 +112,7 @@ re-shape a task if answered differently:
 | # | Question | Default if unanswered |
 |---|----------|----------------------|
 | Q1 | **Which controller/display protocol?** (Bafang UART, KT/Kunteng, APT, proprietary…) | A1 captures it blind and documents what it finds |
-| Q2 | **Is the controller↔display link two wires (full duplex) or one shared half-duplex wire?** | Assume full duplex, two UARTs (A2/A3) |
+| ~~Q2~~ | ~~**Is the controller↔display link two wires (full duplex) or one shared half-duplex wire?**~~ | ✅ **Answered 2026-07-28: two wires, full duplex.** Two UARTs as planned (A2/A3); A2 is no longer gated on A1 |
 | Q3 | **What is the motor-enable line electrically?** (voltage, current, switched high or low, is it the ignition/lock line?) | Assume a low-current signal line; drive a MOSFET/SSR, not a coil, from GPIO |
 | Q4 | **Which sensors are you adding, and on what bus?** (I²C / ADC / one-wire) | C2 is written against a generic sampled-source interface |
 | Q5 | **Is a physical unlock button wanted in addition to the app?** | Planned as optional B5, behind a `lock-button` alias |
@@ -225,3 +225,4 @@ contradicted an assumption above, so the plan stays honest.
 |------|------|---------|
 | 2026-07-28 | — | Plan written. nRF52840 has exactly two UARTE instances, so the DK's UART console must move to RTT once both carry bike traffic (§2). |
 | 2026-07-28 | — | `BT_GATT_PERM_*_ENCRYPT` (level 2) is satisfiable by Just Works, unlike the `*_AUTHEN` perms that made `CONFIG_BT_NUS_AUTHEN` unusable — so the control service can be stack-enforced (§3 D1). |
+| 2026-07-28 | Q2 | Controller↔display link confirmed **two wires, full duplex** — the two-UART design in `MITM_PLAN.md` holds unchanged, and A2 can proceed in parallel with A1 rather than waiting on it. |
