@@ -204,9 +204,11 @@ generically, here.
 | `state` | read, notify | `BT_GATT_PERM_READ_ENCRYPT` | `[version][lock_state][reason][flags]` |
 | `telemetry` | notify | `BT_GATT_PERM_READ_ENCRYPT` | reserved for workstream D |
 
-Opcodes: `0x01 UNLOCK`, `0x02 LOCK`, `0x03 SET_AUTO_UNLOCK(bool)`, `0x04 GET_STATE`. A leading
-version byte so the app and firmware can disagree gracefully; unknown opcode or wrong version
-→ rejected with an error response, never silently ignored.
+Opcodes: `0x01 UNLOCK`, `0x02 LOCK`, `0x03 SET_AUTO_UNLOCK(bool)`, `0x04 GET_STATE`,
+`0x05 SET_PROTOCOL(id)` — the last one belongs to `PROTOCOL_PLAN.md` A4, which needs the app to
+be authoritative about which controller protocol is on the wire, and this is the channel for it.
+A leading version byte so the app and firmware can disagree gracefully; unknown opcode or wrong
+version → rejected with an error response, never silently ignored.
 
 `BT_GATT_PERM_*_ENCRYPT` requires security level 2, which Just Works pairing satisfies — see
 `FEATURE_PLAN.md` §3 D1 for why this differs from the `CONFIG_BT_NUS_AUTHEN` trap. Keep the
@@ -307,6 +309,11 @@ serialisation only — the settings backend is Zephyr).
 **Design:** one settings key, `nrfproxy/auto_unlock`, a single byte. Saved when the app sends
 `SET_AUTO_UNLOCK`, loaded at boot. **The lock state itself is never written** — assert this in
 review; it is the one line that would quietly undo the feature.
+
+This handler is also where `PROTOCOL_PLAN.md` A4 persists the selected controller protocol
+(`nrfproxy/protocol`). Same mechanism, same commit if the two land together; the protocol
+choice *is* persisted, unlike the lock state, because re-detecting on every boot is exactly
+what selecting it explicitly was meant to avoid.
 
 `bond_reset_requested()` wipes the pairing; decide whether it also clears preferences.
 **Recommendation: yes** — a factory reset that leaves the previous owner's auto-unlock enabled

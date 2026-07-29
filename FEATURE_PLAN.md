@@ -5,7 +5,7 @@ four workstreams; each has its own detail document with the individually-commita
 
 | # | Workstream | Detail doc | What it delivers |
 |---|-----------|-----------|------------------|
-| **A** | Controller protocol: capture + framing | [`PROTOCOL_PLAN.md`](PROTOCOL_PLAN.md) | Know the wire format; parse the byte stream into messages |
+| **A** | Controller protocols: capture, framing, selection | [`PROTOCOL_PLAN.md`](PROTOCOL_PLAN.md) | Know the wire formats (**four of them, different baud rates**); parse; pick the right one at runtime |
 | **B** | Controller locking (proximity / button) | [`LOCK_PLAN.md`](LOCK_PLAN.md) | Relay on the motor-enable line, gated on app + connection + unlock |
 | **C** | Interception / insertion of extra data & sensors | [`INTERCEPT_PLAN.md`](INTERCEPT_PLAN.md) | Enrich what the app receives; validate what it sends |
 | **D** | Remote diagnostics / telemetry to the app | [`TELEMETRY_PLAN.md`](TELEMETRY_PLAN.md) | Health/debug snapshots over BLE, compiled out or idle when unused |
@@ -115,7 +115,7 @@ re-shape a task if answered differently:
 
 | # | Question | Status / default |
 |---|----------|------------------|
-| Q1 | **Which controller protocol?** (Bafang UART, KT/Kunteng, APT, proprietary…) | Open — A1 captures it blind and documents what it finds |
+| Q1 | **Which four protocols?** Naming them decides how much of A1 is real capture versus reverse engineering from published sources — and **which of them you can physically capture**, since downlink command support should not ship for a protocol never seen on a wire | Open — A1 is structured as one commit per protocol so they can land as access allows |
 | ~~Q2~~ | ~~Two wires or one shared half-duplex?~~ | ✅ **Answered: two wires, full duplex** — one UART, already wired. No second port needed |
 | Q3 | **What is the motor-enable line electrically?** (voltage, current, switched high or low, is it the ignition/lock line?) | Open — assume a low-current signal line; drive a MOSFET/SSR, not a coil, from GPIO |
 | Q4 | **Which sensors are you adding, and on what bus?** (I²C / ADC / one-wire) | Open — C2 is written against a generic sampled-source interface |
@@ -126,12 +126,17 @@ re-shape a task if answered differently:
 ## 5. Order of attack
 
 ```
-A1 capture protocol ──► A2 frame.c ──► A3 counters ──┬──► C1 ──► C2 ──► C3 ──► C4
-                                                     │
+A1 capture (xN) ──► A2 frame.c + descriptors ──► A3 counters ──┬──► C1 ──► C2 ──► C3 ──► C4
+                                   │                           │
+                                   └──► A4 protocol select ────┤
+                                              ▲                │
 B1 lock core ──► B2 relay GPIO ──► B3 control svc ──► B4 ──► B5/B6 ──► B7
                                         │
                                         └──► D1 ──► D2 ──► D3 ──► D4 ──► D5
 ```
+
+A4 needs B3's control service for `SET_PROTOCOL` and B6's settings handler for persistence —
+the one place the two independent halves of the programme meet.
 
 Rationale for starting where we start:
 
@@ -163,10 +168,11 @@ construction.
 Tick these off as they land. Task detail — files touched, tests, acceptance criteria, suggested
 commit message — is in the per-workstream docs.
 
-### Workstream A — Controller protocol (`PROTOCOL_PLAN.md`)
-- [ ] **A1** Capture and document the controller protocol, both directions → `PROTOCOL.md` + fixtures
-- [ ] **A2** `frame.c` — resumable message parser with resync and checksum validation
+### Workstream A — Controller protocols (`PROTOCOL_PLAN.md`)
+- [ ] **A1** Capture and document each protocol, both directions → `PROTOCOL.md` + fixtures *(one commit per protocol)*
+- [ ] **A2** `frame.c` — pluggable multi-protocol parser: one state machine, one descriptor per protocol
 - [ ] **A3** Frame-level health counters, separate from transport drops
+- [ ] **A4** Protocol + baud selection: app-configured and authoritative, auto-detect as fallback
 
 ### Workstream B — Controller locking (`LOCK_PLAN.md`)
 - [ ] **B1** `lock_core.c` — the lock state machine, pure logic, test-first
@@ -223,4 +229,6 @@ contradicted an assumption above, so the plan stays honest.
 |------|------|---------|
 | 2026-07-28 | — | `BT_GATT_PERM_*_ENCRYPT` (level 2) is satisfiable by Just Works, unlike the `*_AUTHEN` perms that made `CONFIG_BT_NUS_AUTHEN` unusable — so the control service can be stack-enforced (§3 D1). |
 | 2026-07-28 | Q2 | Controller↔nRF link is two wires, full duplex — one UART's TX/RX pair, already wired. |
+| 2026-07-28 | A4 | **UART baud rates are not auto-negotiable** — UART is asynchronous with no handshake, and the nRF52840's UARTE has no hardware auto-baud detect. Selection is app-configured (authoritative) with a candidate-scan auto-detect as fallback, using the checksum as the oracle. |
+| 2026-07-28 | A2 | **CPU is not a constraint for packet manipulation**: ~5,500 cycles/byte at 115200 baud, ~533,000 at 1200, against 5–10 cycles/byte for a table-driven CRC. Flash ~232 KB of 1 MB used. The real ceilings are BLE throughput (`TODO.md` I1) and RAM — the latter still unmeasured. |
 | 2026-07-28 | **§2** | **The Android app is the display; there is no physical display in the serial chain.** The first draft assumed one and specified a second UART, a `uart_bridge` refactor, a passthrough datapath and a DK console move to RTT. All deleted — the existing one-UART bridge is the correct topology. Workstream A collapsed from 7 tasks to 3. |
