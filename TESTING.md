@@ -137,8 +137,16 @@ rather than assertions that were wrong.
    mistyped `-T` path, a renamed suite directory, or a `testcase.yaml` that stopped matching
    the platform filter would all have reported success. `scripts/assert_tests_ran.py` now
    asserts a floor of *executed* tests and no recorded failures, wired into both twister jobs.
-   Floors sit below current counts (20 against 25, 6 against 8) so adding tests never breaks
-   the build, but losing a suite does.
+
+   **The floors count test *configurations*, not ztest cases.** Twister's JUnit report emits
+   one `<testsuite>` per scenario, so `tests/unit` reports **3** (hooks, identity, policy) and
+   `tests/integration` reports **1** (uart_bridge) — not the 25 and 8 ZTEST functions inside
+   them. The floors are set at those numbers, so adding a suite is free and losing one fails.
+   **Raise the floor whenever you add a suite** (§7).
+
+   *This was got wrong on the first attempt: floors of 20 and 6 were set from the ZTEST counts,
+   and CI went red with both suites passing 100%. The guard behaved correctly — it is recorded
+   here because the two granularities are easy to conflate.*
 
 Otherwise: no `continue-on-error` anywhere, GitHub's `bash` shell runs `-eo pipefail`, and
 `if-no-files-found: error` on the firmware artifacts means a build that silently produced
@@ -205,8 +213,10 @@ Carried over from `ADD_TESTING_PLAN.md` so it is not re-derived from scratch:
 - **New Zephyr-free module?** Host test in the same commit. It is the cheapest tier and the
   only one that runs on the dev box.
 - **New ztest suite?** Add it under `tests/unit/` or `tests/integration/` (twister discovers it
-  from `testcase.yaml`) and **raise the floor** in the matching `assert_tests_ran.py` step in
-  `ci.yml`, or a later deletion of it goes unnoticed.
+  from `testcase.yaml`) and **raise the `--min` floor** in the matching `assert_tests_ran.py`
+  step in `ci.yml`, or a later deletion of it goes unnoticed. The floor counts *configurations*
+  (one per suite), not ztest cases — adding a whole suite raises it by one, adding cases to an
+  existing suite does not change it at all.
 - **New build invariant?** Add the check to `scripts/check_configs.py` *and* a test to
   `scripts/test_check_configs.py` that breaks it deliberately. Every existing check has one.
 - **New shell or PowerShell script?** Add it to the `lint` job's shellcheck / parser lists.

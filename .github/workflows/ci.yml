@@ -145,11 +145,15 @@ jobs:
 
       # Guards the false green: Twister exits 0 when it runs *nothing*, so a
       # mistyped -T path or a suite that stops matching the platform filter
-      # would look like success. The floor is deliberately below the current
-      # count (25) so adding tests never breaks the build, but losing a whole
-      # suite does.
+      # would look like success.
+      #
+      # The floor counts TEST CONFIGURATIONS, not ztest cases: Twister's JUnit
+      # report has one <testsuite> per scenario, so the three suites here
+      # (hooks, identity, policy) are 3, not the 25 ZTEST functions inside them.
+      # Set it at the current number so adding a suite is free and losing one
+      # fails. Raise it whenever a suite is added.
       - name: Assert the unit suites actually ran
-        run: python3 nrfProxy/scripts/assert_tests_ran.py twister-out/twister.xml --min 20
+        run: python3 nrfProxy/scripts/assert_tests_ran.py twister-out/twister.xml --min 3
 
       - name: Upload the test report
         if: always()
@@ -183,9 +187,11 @@ jobs:
         working-directory: ncs
         run: west twister -T "$GITHUB_WORKSPACE/nrfProxy/tests/integration" -p native_sim --inline-logs -O "$GITHUB_WORKSPACE/twister-out"
 
-      # Same false-green guard as the unit job; floor set below the current 8.
+      # Same false-green guard as the unit job. One configuration here
+      # (uart_bridge), carrying 8 ztest cases -- see the note there on why the
+      # floor is in configurations rather than cases.
       - name: Assert the integration suite actually ran
-        run: python3 nrfProxy/scripts/assert_tests_ran.py twister-out/twister.xml --min 6
+        run: python3 nrfProxy/scripts/assert_tests_ran.py twister-out/twister.xml --min 1
 
       - name: Upload the test report
         if: always()
