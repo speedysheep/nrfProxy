@@ -54,43 +54,80 @@ size_t on_uart_rx(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_siz
 /* Phone -> serial: bytes received over BLE, before they go out UART1. */
 size_t on_ble_rx(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size);
 
-/* --- Relay-control command (phone -> device) ------------------------------ */
+/* --- Device-control command (phone -> device) ----------------------------- */
 /*
- * A tiny framed command the phone sends over NUS to drive the relay GPIO (motor
- * enable), rather than to be forwarded down the UART. Three bytes, minimal by
- * design:
- *   [0] start    = PROXY_RELAY_START (0x22)
- *   [1] state    = 0x00 disable / 0x01 enable
- *   [2] checksum = (start + state) & 0xFF   (8-bit additive sum)
+ * A fixed-width 16-byte framed command the phone sends over NUS to control
+ * *this* device (drive the relay GPIO, change the UART baud, …), rather than to
+ * be forwarded down the UART. The width is fixed so the format never has to grow
+ * again: a new control takes a new opcode and reuses the spare payload bytes.
+ *
+ *   [0]     start    = PROXY_CMD_START (0x22)
+ *   [1]     length   = PROXY_CMD_PACKET_LEN (16) — declared length, must match
+ *   [2]     opcode   = PROXY_OP_* (which control)
+ *   [3..14] payload  = opcode-specific (unused bytes zero)
+ *   [15]    checksum = sum(in[0..14]) & 0xFF   (8-bit additive sum)
  *
  * The BLE link is already encrypted (pairing lock), so the checksum only guards
- * against corruption / accidental framing, not tampering. On a valid packet
- * main.c drives the pin and echoes the *exact* three bytes back to the phone as
- * an acknowledgement, so the phone can confirm the command took effect.
+ * against corruption / accidental framing, not tampering.
  *
- * Only a fully valid packet (exact length, start byte, matching checksum, state
- * in {0,1}) is intercepted; anything else returns PROXY_RELAY_NONE and is
- * forwarded to the UART as ordinary data.
+ * Opcodes and their payloads:
+ *   PROXY_OP_RELAY (0x01): payload[0] = 0 disable / 1 enable the relay pin.
+ *   PROXY_OP_BAUD  (0x02): payload[0..3] = new UART baud, uint32 little-endian.
+ *                          Only an allow-listed rate is accepted (see
+ *                          proxy_baud_supported).
+ *
+ * On an actionable command main.c performs the action and echoes the *exact*
+ * 16 bytes back to the phone as an acknowledgement, so the phone can confirm it
+ * took effect.
+ *
+ * Classification (proxy_cmd_parse → struct proxy_cmd::kind):
+ *   PROXY_CMD_NONE     framing did not validate (wrong start/length/checksum) —
+ *                      not ours; forward down the UART as ordinary data.
+ *   PROXY_CMD_INVALID  framed for us but the opcode is unknown or the payload is
+ *                      out of range — consume it (a framed control packet is
+ *                      never forwarded to the motor) but take no action and send
+ *                      no ack.
+ *   PROXY_CMD_RELAY_*  drive the relay pin (disable/enable).
+ *   PROXY_CMD_SET_BAUD reconfigure the UART to `baud`.
  */
-#define PROXY_RELAY_START      0x22
-#define PROXY_RELAY_PACKET_LEN 3
+#define PROXY_CMD_START        0x22
+#define PROXY_CMD_PACKET_LEN   16
+#define PROXY_CMD_PAYLOAD_OFF  3    /* index of the first payload byte */
 
-enum proxy_relay_action {
-	PROXY_RELAY_NONE = 0,  /* not a valid relay command — forward as data */
-	PROXY_RELAY_DISABLE,   /* valid packet: drive the relay pin inactive */
-	PROXY_RELAY_ENABLE,    /* valid packet: drive the relay pin active */
+enum proxy_cmd_op {
+	PROXY_OP_RELAY = 0x01,
+	PROXY_OP_BAUD  = 0x02,
+};
+
+enum proxy_cmd_kind {
+	PROXY_CMD_NONE = 0,     /* not a valid command — forward as UART data */
+	PROXY_CMD_INVALID,      /* framed for us but bad opcode/payload — drop */
+	PROXY_CMD_RELAY_DISABLE,
+	PROXY_CMD_RELAY_ENABLE,
+	PROXY_CMD_SET_BAUD,
+};
+
+struct proxy_cmd {
+	enum proxy_cmd_kind kind;
+	uint32_t baud;                      /* set for PROXY_CMD_SET_BAUD only */
+	uint8_t ack[PROXY_CMD_PACKET_LEN];  /* echo bytes, actionable cmds only */
+	size_t ack_len;                     /* 0 unless there is an ack to send */
 };
 
 /*
- * Classify a phone->device chunk. On a well-formed relay command, returns
- * PROXY_RELAY_ENABLE/PROXY_RELAY_DISABLE and copies the packet verbatim into
- * `ack` (which must hold at least PROXY_RELAY_PACKET_LEN bytes) as the
- * acknowledgement to echo back, setting *ack_len. Otherwise returns
- * PROXY_RELAY_NONE and leaves `ack`/`ack_len` untouched.
+ * Whether `baud` is a UART rate this firmware will switch to. The nRF UARTE only
+ * realises a fixed set of rates; this is the intersection with the ones the
+ * e-bike controllers use (1200 for Bafang at the slow end, up to 115200).
  */
-enum proxy_relay_action proxy_relay_parse(const uint8_t *in, size_t in_len,
-					  uint8_t *ack, size_t ack_size,
-					  size_t *ack_len);
+bool proxy_baud_supported(uint32_t baud);
+
+/*
+ * Classify a phone->device chunk and, for an actionable command, fill `out`
+ * (which must be non-NULL) with the action, any parameters, and the ack bytes to
+ * echo back. Returns out->kind. See the table above for what each kind means.
+ */
+enum proxy_cmd_kind proxy_cmd_parse(const uint8_t *in, size_t in_len,
+				    struct proxy_cmd *out);
 
 /* --- Per-device identity -------------------------------------------------- */
 

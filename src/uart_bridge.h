@@ -45,6 +45,19 @@ int uart_bridge_init(const struct device *uart_dev, struct k_sem *rx_data_ready)
  * logged. Safe from thread context. */
 void uart_bridge_send(const uint8_t *data, size_t len);
 
+/*
+ * Change the UART baud rate at runtime — for switching between motor controllers
+ * that talk at different rates (1200..115200). Quiesces RX and TX, reconfigures,
+ * and restarts reception; any in-flight or buffered bytes are dropped, which is
+ * fine because a baud change means the peer on the other end just changed too.
+ *
+ * Returns 0 on success (the new rate is live), or a negative errno on failure,
+ * in which case the previous rate stays in effect and reception is restarted.
+ * **Thread context only** — it blocks briefly waiting for RX to stop; never call
+ * it from an ISR. Serialise calls (the app only calls it from the BT RX thread).
+ */
+int uart_bridge_set_baud(uint32_t baud);
+
 /* --- RX consumption. Consumer thread only (see the contract above). -------- */
 
 bool uart_bridge_rx_is_empty(void);
