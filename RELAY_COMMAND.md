@@ -97,9 +97,15 @@ host-tested); the GPIO drive, baud reconfigure, and ack live in `main.c`.
 On an actionable command the firmware performs the action and then **echoes the
 exact same 16 bytes back** as a NUS TX notification. The phone confirms the
 command took effect by matching the echo against what it sent. **No echo = not
-applied** (link dropped, no relay GPIO on that board, refused opcode/payload, or
-— for a baud change — reconfiguration failed and the old rate is still live);
-re-send.
+applied** (link dropped, refused opcode/payload, or — for a baud change —
+reconfiguration failed and the old rate is still live); re-send.
+
+⚠️ The echo means *the firmware acted on the command*, not that hardware moved.
+A RELAY command on a board whose overlay defines no `relay-control` alias is
+logged and ignored by `relay_set()` — and still acked, because `cmd_ack_send()`
+follows it unconditionally (`main.c`). Nothing downstream of the pin is verified
+either. If a caller needs "there is a relay here", that has to become its own
+opcode; it cannot be inferred from the ack.
 
 ## Pin per board (RELAY opcode)
 
@@ -117,10 +123,10 @@ set by the `GPIO_ACTIVE_HIGH`/`GPIO_ACTIVE_LOW` flag in the board overlay's
 | nRF52840 Dongle             | **P1.10** | free castellated pad                   |
 
 All default to active-high: pin high = relay energised = motor enabled. A board
-overlay may omit the `relay-control` alias, in which case that board has no relay
-and a RELAY command is acknowledged only after being logged/ignored (no pin to
-drive → the command is refused and no ack is sent). A BAUD command works on every
-board — it needs no board GPIO.
+overlay may omit the `relay-control` alias, in which case that board has no relay:
+a RELAY command is logged, ignored, **and still acknowledged** (see the warning
+under [Acknowledgement](#acknowledgement)). A BAUD command works on every board —
+it needs no board GPIO.
 
 ## Quick test with nRF Connect for Mobile
 
