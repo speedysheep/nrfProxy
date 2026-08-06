@@ -107,6 +107,11 @@ apps.
   Topology worth knowing before reading any of them: **the Android app is the display** —
   `Motor → Controller → nRF52840 UART1 → BLE NUS → Android app`. There is no physical
   display in the serial chain, so one UART is the correct and sufficient design.
+- `RELAY_COMMAND.md` — the phone→device **relay-control command** (toggle the motor-enable
+  GPIO over BLE): the 3-byte packet format, the two valid packets, the echo-back ack, and the
+  per-board relay pin. User-facing "what to send"; the firmware side is in `proxy_core.c`
+  (`proxy_relay_parse`) + `main.c` (`relay_set`/`relay_ack_send`) and the `relay-control`
+  alias in each board overlay.
 - `TODO.md` — code-review findings ranked by severity, with what was fixed.
   `TODO_ARCHITECTURE.md` — architecture-review follow-up tasks and their progress.
 - `.mcp.json` — Memfault MCP server config (unrelated to firmware).
@@ -402,7 +407,13 @@ data is repetitive/safe to drop).
 
 **Phone → serial:** `nus_received` (Bluetooth RX thread) passes data through the
 `on_ble_rx` hook into `uart_bridge_send()`, which queues it in `uart_tx_ringbuf` and calls
-`uart_tx_kick()`. Because `uart_tx()` allows only one transfer in flight, `uart_tx_kick()`
+`uart_tx_kick()`. **Before** that, `nus_received` checks each write for a **relay-control
+command** (`proxy_relay_parse` — a 3-byte `0x22`/state/checksum packet); a valid one drives
+the `relay-control` GPIO (motor-enable relay) via `relay_set()`, echoes the exact packet back
+to the phone as an ack (`relay_ack_send`), and is **not** forwarded to UART. Anything that
+isn't a valid relay packet falls through to the normal forward path. The wire format and the
+per-board relay pin are documented in `RELAY_COMMAND.md`; the parse/validation is pure logic
+in `proxy_core.c` (host-tested), the GPIO + ack live in `main.c`. Because `uart_tx()` allows only one transfer in flight, `uart_tx_kick()`
 stages one contiguous chunk in `uart_tx_buf` and the next chunk is started from the
 `UART_TX_DONE` event. The in-progress flag is guarded with `irq_lock` so kicks from thread
 and ISR don't double-start.

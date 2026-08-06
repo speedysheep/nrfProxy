@@ -11,6 +11,7 @@
  */
 
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
 	/* Status-LED roles -> three of the DK's LEDs (LED2/LED3/LED4). */
@@ -23,6 +24,16 @@
 		 * wipe the stored pairing. The board node already carries
 		 * GPIO_PULL_UP | GPIO_ACTIVE_LOW. */
 		bond-reset = &button0;
+
+		/* Relay-control output the phone toggles over BLE (motor enable).
+		 * P1.04 is free and broken out on the DK headers. Active-high by
+		 * default (pin high = relay energised / motor enabled); change to
+		 * GPIO_ACTIVE_LOW for an active-low relay module. */
+		relay-control = &relay_control;
+	};
+
+	relay_control: relay-control {
+		gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
 	};
 };
 

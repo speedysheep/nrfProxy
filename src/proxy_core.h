@@ -54,6 +54,44 @@ size_t on_uart_rx(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_siz
 /* Phone -> serial: bytes received over BLE, before they go out UART1. */
 size_t on_ble_rx(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size);
 
+/* --- Relay-control command (phone -> device) ------------------------------ */
+/*
+ * A tiny framed command the phone sends over NUS to drive the relay GPIO (motor
+ * enable), rather than to be forwarded down the UART. Three bytes, minimal by
+ * design:
+ *   [0] start    = PROXY_RELAY_START (0x22)
+ *   [1] state    = 0x00 disable / 0x01 enable
+ *   [2] checksum = (start + state) & 0xFF   (8-bit additive sum)
+ *
+ * The BLE link is already encrypted (pairing lock), so the checksum only guards
+ * against corruption / accidental framing, not tampering. On a valid packet
+ * main.c drives the pin and echoes the *exact* three bytes back to the phone as
+ * an acknowledgement, so the phone can confirm the command took effect.
+ *
+ * Only a fully valid packet (exact length, start byte, matching checksum, state
+ * in {0,1}) is intercepted; anything else returns PROXY_RELAY_NONE and is
+ * forwarded to the UART as ordinary data.
+ */
+#define PROXY_RELAY_START      0x22
+#define PROXY_RELAY_PACKET_LEN 3
+
+enum proxy_relay_action {
+	PROXY_RELAY_NONE = 0,  /* not a valid relay command — forward as data */
+	PROXY_RELAY_DISABLE,   /* valid packet: drive the relay pin inactive */
+	PROXY_RELAY_ENABLE,    /* valid packet: drive the relay pin active */
+};
+
+/*
+ * Classify a phone->device chunk. On a well-formed relay command, returns
+ * PROXY_RELAY_ENABLE/PROXY_RELAY_DISABLE and copies the packet verbatim into
+ * `ack` (which must hold at least PROXY_RELAY_PACKET_LEN bytes) as the
+ * acknowledgement to echo back, setting *ack_len. Otherwise returns
+ * PROXY_RELAY_NONE and leaves `ack`/`ack_len` untouched.
+ */
+enum proxy_relay_action proxy_relay_parse(const uint8_t *in, size_t in_len,
+					  uint8_t *ack, size_t ack_size,
+					  size_t *ack_len);
+
 /* --- Per-device identity -------------------------------------------------- */
 
 #define PROXY_ADDR_LEN         6   /* == BT_ADDR_SIZE */

@@ -20,6 +20,7 @@
  */
 
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
 	/*
@@ -36,6 +37,17 @@
 		 * side RESET) through boot ~3 s to wipe the stored pairing. The
 		 * board node already carries GPIO_PULL_UP | GPIO_ACTIVE_LOW. */
 		bond-reset = &button0;
+
+		/* Relay-control output the phone toggles over BLE (motor enable).
+		 * P1.10 is a free broken-out castellated pad (uart1 P0.13/15,
+		 * uart0 P0.20/17/24/22, i2c0 P0.26/27, spi1 P0.31/30/P1.13, LEDs
+		 * P0.06/08/12 + P1.09, SW1 P1.06 are taken). Active-high; use
+		 * GPIO_ACTIVE_LOW for an active-low relay module. */
+		relay-control = &relay_control;
+	};
+
+	relay_control: relay-control {
+		gpios = <&gpio1 10 GPIO_ACTIVE_HIGH>;
 	};
 
 	/*
