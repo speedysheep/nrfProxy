@@ -26,40 +26,97 @@ size_t on_ble_rx(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size
 	return n;
 }
 
-/* --- Relay-control command ------------------------------------------------ */
+/* --- Device-control command ----------------------------------------------- */
 
-/* 8-bit additive checksum over the packet's leading bytes. Trivial on purpose:
- * the encrypted link, not this byte, is the security boundary — it only catches
- * a corrupted or mis-framed write. */
-static uint8_t relay_checksum(uint8_t start, uint8_t state)
+/* 8-bit additive checksum over the packet's bytes preceding the checksum byte.
+ * Trivial on purpose: the encrypted link, not this byte, is the security
+ * boundary — it only catches a corrupted or mis-framed write. */
+static uint8_t cmd_checksum(const uint8_t *in)
 {
-	return (uint8_t)(start + state);
+	uint8_t sum = 0;
+
+	for (size_t i = 0; i < PROXY_CMD_PACKET_LEN - 1; i++) {
+		sum = (uint8_t)(sum + in[i]);
+	}
+	return sum;
 }
 
-enum proxy_relay_action proxy_relay_parse(const uint8_t *in, size_t in_len,
-					  uint8_t *ack, size_t ack_size,
-					  size_t *ack_len)
+bool proxy_baud_supported(uint32_t baud)
 {
-	if (in_len != PROXY_RELAY_PACKET_LEN || in[0] != PROXY_RELAY_START) {
-		return PROXY_RELAY_NONE;
-	}
-	if (in[2] != relay_checksum(in[0], in[1])) {
-		return PROXY_RELAY_NONE;
-	}
-	if (in[1] != 0 && in[1] != 1) {
-		return PROXY_RELAY_NONE;
-	}
+	static const uint32_t supported[] = {
+		1200, 9600, 19200, 38400, 57600, 115200,
+	};
 
-	/* Acknowledge with the exact bytes received, so the phone matches its
-	 * command against the echo. */
-	if (ack != NULL && ack_size >= PROXY_RELAY_PACKET_LEN) {
-		memcpy(ack, in, PROXY_RELAY_PACKET_LEN);
-		if (ack_len != NULL) {
-			*ack_len = PROXY_RELAY_PACKET_LEN;
+	for (size_t i = 0; i < sizeof(supported) / sizeof(supported[0]); i++) {
+		if (baud == supported[i]) {
+			return true;
 		}
 	}
+	return false;
+}
 
-	return in[1] ? PROXY_RELAY_ENABLE : PROXY_RELAY_DISABLE;
+static uint32_t le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+enum proxy_cmd_kind proxy_cmd_parse(const uint8_t *in, size_t in_len,
+				    struct proxy_cmd *out)
+{
+	const uint8_t *payload = &in[PROXY_CMD_PAYLOAD_OFF];
+
+	out->kind = PROXY_CMD_NONE;
+	out->baud = 0;
+	out->ack_len = 0;
+
+	/* Framing gate: anything that isn't exactly our 16-byte packet, with a
+	 * self-consistent length and a good checksum, is treated as ordinary data
+	 * and forwarded down the UART. */
+	if (in_len != PROXY_CMD_PACKET_LEN ||
+	    in[0] != PROXY_CMD_START ||
+	    in[1] != PROXY_CMD_PACKET_LEN ||
+	    in[PROXY_CMD_PACKET_LEN - 1] != cmd_checksum(in)) {
+		return PROXY_CMD_NONE;
+	}
+
+	/* Framed for us: from here on it is never forwarded as data, even when
+	 * the opcode or payload is bad (that becomes PROXY_CMD_INVALID). */
+	switch (in[2]) {
+	case PROXY_OP_RELAY:
+		if (payload[0] == 0) {
+			out->kind = PROXY_CMD_RELAY_DISABLE;
+		} else if (payload[0] == 1) {
+			out->kind = PROXY_CMD_RELAY_ENABLE;
+		} else {
+			out->kind = PROXY_CMD_INVALID;
+		}
+		break;
+	case PROXY_OP_BAUD: {
+		uint32_t baud = le32(payload);
+
+		if (proxy_baud_supported(baud)) {
+			out->kind = PROXY_CMD_SET_BAUD;
+			out->baud = baud;
+		} else {
+			out->kind = PROXY_CMD_INVALID;
+		}
+		break;
+	}
+	default:
+		out->kind = PROXY_CMD_INVALID;
+		break;
+	}
+
+	/* Echo the exact packet back for an actionable command; an INVALID one is
+	 * silently dropped (no ack), so the phone can distinguish "took effect"
+	 * from "refused" by whether the echo arrives. */
+	if (out->kind != PROXY_CMD_INVALID) {
+		memcpy(out->ack, in, PROXY_CMD_PACKET_LEN);
+		out->ack_len = PROXY_CMD_PACKET_LEN;
+	}
+
+	return out->kind;
 }
 
 /* --- Per-device identity -------------------------------------------------- */

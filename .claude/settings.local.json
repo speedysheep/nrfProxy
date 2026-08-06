@@ -1,4 +1,12 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(powershell -File tests/host/run.ps1)",
+      "Bash(ls \"C:/ncs/toolchains/936afb6332/mingw64/bin/\" 2>/dev/null | grep -iE \"gcc|clang|cc\\\\.exe\" ; echo \"---opt---\"; ls \"C:/ncs/toolchains/936afb6332/opt/bin/\" 2>/dev/null | grep -iE \"gcc|clang\" | head)",
+      "Read(//c/ncs/toolchains/936afb6332/mingw64/bin/**)",
+      "Read(//c/ncs/toolchains/936afb6332/opt/bin/**)"
+    ]
+  },
   "enabledMcpjsonServers": [
     "memfault"
   ]

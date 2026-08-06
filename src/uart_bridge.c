@@ -43,6 +43,15 @@ static size_t uart_tx_len; /* bytes of the in-flight uart_tx() transfer */
 static const struct device *bridge_dev;
 static struct k_sem *rx_ready_sem;
 
+/* Set true by uart_bridge_set_baud() for the duration of a reconfigure, so the
+ * RX auto-restart machinery and the TX pump don't fight it (they'd otherwise
+ * re-enable RX at the old rate, or push bytes out mid-reconfigure). Written from
+ * a thread under irq_lock, read from both thread and the UART ISR — hence
+ * volatile. rx_quiesced is given from the ISR's UART_RX_DISABLED once reception
+ * has actually stopped, which is what set_baud waits on. */
+static volatile bool uart_reconfiguring;
+static K_SEM_DEFINE(rx_quiesced, 0, 1);
+
 /* ISR-safe drop counters — reported from the consumer thread. */
 static atomic_t drops_uart_rx_ring;
 static atomic_t drops_uart_tx;
@@ -54,12 +63,37 @@ static atomic_t last_uart_tx_err;
 static struct k_work_delayable uart_rx_retry_work;
 static bool uart_rx_retry_warned;
 
+/* Allocate an RX buffer from the slab and (re)start async reception with it.
+ * Shared by init, the auto-restart paths, and the baud reconfigure. Returns 0,
+ * or a negative errno (with the buffer freed) if reception could not start. */
+static int uart_bridge_start_rx(void)
+{
+	uint8_t *buf;
+	int err;
+
+	err = k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT);
+	if (err) {
+		return err;
+	}
+
+	err = uart_rx_enable(bridge_dev, buf, UART_BUF_SIZE, UART_RX_TIMEOUT_US);
+	if (err) {
+		k_mem_slab_free(&uart_rx_slab, buf);
+	}
+	return err;
+}
+
 static void uart_rx_retry_handler(struct k_work *work)
 {
 	uint8_t *buf = NULL;
 	int err;
 
 	ARG_UNUSED(work);
+
+	/* A baud reconfigure owns the RX state; it will restart reception itself. */
+	if (uart_reconfiguring) {
+		return;
+	}
 
 	if (k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT) != 0) {
 		if (uart_rx_retry_warn_once(&uart_rx_retry_warned)) {
@@ -92,7 +126,7 @@ static void uart_tx_kick(void)
 {
 	unsigned int key = irq_lock();
 
-	if (uart_tx_in_progress) {
+	if (uart_tx_in_progress || uart_reconfiguring) {
 		irq_unlock(key);
 		return;
 	}
@@ -189,9 +223,16 @@ static void uart_cb(const struct device *dev, struct uart_event *evt,
 		break;
 
 	case UART_RX_DISABLED:
-		/* Reception stopped (e.g. out of buffers): restart it. Keep the
-		 * inline attempt; on any failure the delayed work retries from
-		 * thread context. */
+		/* A baud reconfigure disabled RX on purpose: hand off to
+		 * uart_bridge_set_baud (it restarts RX at the new rate) and do
+		 * NOT auto-restart here at the old rate. */
+		if (uart_reconfiguring) {
+			k_sem_give(&rx_quiesced);
+			break;
+		}
+		/* Otherwise reception stopped unexpectedly (e.g. out of buffers):
+		 * restart it. Keep the inline attempt; on any failure the delayed
+		 * work retries from thread context. */
 		if (k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT) == 0) {
 			err = uart_rx_enable(dev, buf, UART_BUF_SIZE,
 					     UART_RX_TIMEOUT_US);
@@ -216,7 +257,6 @@ static void uart_cb(const struct device *dev, struct uart_event *evt,
 
 int uart_bridge_init(const struct device *uart_dev, struct k_sem *rx_data_ready)
 {
-	uint8_t *buf;
 	int err;
 
 	bridge_dev = uart_dev;
@@ -234,18 +274,77 @@ int uart_bridge_init(const struct device *uart_dev, struct k_sem *rx_data_ready)
 		return err;
 	}
 
-	err = k_mem_slab_alloc(&uart_rx_slab, (void **)&buf, K_NO_WAIT);
-	if (err) {
-		return err;
+	return uart_bridge_start_rx();
+}
+
+int uart_bridge_set_baud(uint32_t baud)
+{
+	struct uart_config cfg;
+	unsigned int key;
+	int err;
+
+	if (bridge_dev == NULL) {
+		return -ENODEV;
 	}
 
-	err = uart_rx_enable(uart_dev, buf, UART_BUF_SIZE, UART_RX_TIMEOUT_US);
-	if (err) {
-		k_mem_slab_free(&uart_rx_slab, buf);
-		return err;
+	/* Take ownership of the RX/TX state so the auto-restart work and the TX
+	 * pump can't fight the reconfigure (see uart_reconfiguring). Cancel any
+	 * pending RX retry up front; the flag stops a new one being scheduled. */
+	k_work_cancel_delayable(&uart_rx_retry_work);
+	key = irq_lock();
+	uart_reconfiguring = true;
+	irq_unlock(key);
+
+	/* Abort any TX in flight *first*, so it finishes stopping during the RX
+	 * quiesce wait below rather than racing uart_configure(). uart_tx_kick is
+	 * suppressed while reconfiguring, so the TX_ABORTED/TX_DONE handlers won't
+	 * restart it until we're done. */
+	(void)uart_tx_abort(bridge_dev);
+
+	/* Stop reception and wait for it to actually quiesce (UART_RX_DISABLED).
+	 * -EFAULT just means RX was already off, so there is nothing to wait for. */
+	k_sem_reset(&rx_quiesced);
+	err = uart_rx_disable(bridge_dev);
+	if (err == 0) {
+		if (k_sem_take(&rx_quiesced, K_MSEC(200)) != 0) {
+			LOG_ERR("baud change: RX did not stop");
+			err = -ETIMEDOUT;
+			goto restart;
+		}
+	} else if (err != -EFAULT) {
+		LOG_ERR("baud change: uart_rx_disable (%d)", err);
+		goto restart;
 	}
 
-	return 0;
+	err = uart_config_get(bridge_dev, &cfg);
+	if (err) {
+		LOG_ERR("baud change: uart_config_get (%d)", err);
+		goto restart;
+	}
+	cfg.baudrate = baud;
+	err = uart_configure(bridge_dev, &cfg);
+	if (err) {
+		LOG_ERR("baud change: uart_configure to %u (%d)",
+			(unsigned int)baud, err);
+		/* Fall through to restart RX at whatever rate is still in effect. */
+	} else {
+		LOG_INF("UART baud set to %u", (unsigned int)baud);
+	}
+
+restart:
+	key = irq_lock();
+	uart_reconfiguring = false;
+	irq_unlock(key);
+
+	/* Resume: restart reception, and kick the TX pump for anything queued
+	 * (it will now run at the new rate). If RX won't start, fall back on the
+	 * retry work exactly like the unexpected-disable path. */
+	if (uart_bridge_start_rx() != 0) {
+		k_work_reschedule(&uart_rx_retry_work, UART_RX_RETRY_DELAY);
+	}
+	uart_tx_kick();
+
+	return err;
 }
 
 void uart_bridge_send(const uint8_t *data, size_t len)

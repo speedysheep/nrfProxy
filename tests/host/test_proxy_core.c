@@ -41,6 +41,26 @@ static void expect_str(const char *n, const char *got, const char *want)
 	}
 }
 
+/* Assemble a well-formed 16-byte device-control packet: start, length, opcode,
+ * payload (zero-padded), and a correct trailing checksum. */
+static void build_cmd(uint8_t pkt[PROXY_CMD_PACKET_LEN], uint8_t op,
+		      const uint8_t *payload, size_t payload_len)
+{
+	uint8_t sum = 0;
+
+	memset(pkt, 0, PROXY_CMD_PACKET_LEN);
+	pkt[0] = PROXY_CMD_START;
+	pkt[1] = PROXY_CMD_PACKET_LEN;
+	pkt[2] = op;
+	if (payload != NULL && payload_len > 0) {
+		memcpy(&pkt[PROXY_CMD_PAYLOAD_OFF], payload, payload_len);
+	}
+	for (size_t i = 0; i < PROXY_CMD_PACKET_LEN - 1; i++) {
+		sum = (uint8_t)(sum + pkt[i]);
+	}
+	pkt[PROXY_CMD_PACKET_LEN - 1] = sum;
+}
+
 int main(void)
 {
 	uint8_t out[PROC_BUF_SIZE];
@@ -60,46 +80,100 @@ int main(void)
 	n = on_ble_rx(in, 5, out, sizeof(out));
 	expect_u("ble hook", n, 5);
 
-	/* --- relay command --- */
+	/* --- device-control command --- */
 	{
-		uint8_t ack[PROXY_RELAY_PACKET_LEN];
-		size_t ack_len;
-		enum proxy_relay_action a;
+		struct proxy_cmd cmd;
+		uint8_t pkt[PROXY_CMD_PACKET_LEN];
 
-		/* enable: 0x22 0x01 0x23 */
-		uint8_t en[] = { 0x22, 0x01, 0x23 };
-		memset(ack, 0, sizeof(ack));
-		ack_len = 0;
-		a = proxy_relay_parse(en, sizeof(en), ack, sizeof(ack), &ack_len);
-		expect_u("relay enable action", a, PROXY_RELAY_ENABLE);
-		expect_u("relay enable ack len", ack_len, PROXY_RELAY_PACKET_LEN);
-		expect_true("relay enable ack echoes", memcmp(ack, en, 3) == 0);
+		/* baud allow-list (1200 for Bafang, up to 115200) */
+		expect_true("baud 1200 ok", proxy_baud_supported(1200));
+		expect_true("baud 9600 ok", proxy_baud_supported(9600));
+		expect_true("baud 19200 ok", proxy_baud_supported(19200));
+		expect_true("baud 115200 ok", proxy_baud_supported(115200));
+		expect_true("baud 250000 bad", !proxy_baud_supported(250000));
+		expect_true("baud 0 bad", !proxy_baud_supported(0));
 
-		/* disable: 0x22 0x00 0x22 */
-		uint8_t di[] = { 0x22, 0x00, 0x22 };
-		a = proxy_relay_parse(di, sizeof(di), ack, sizeof(ack), &ack_len);
-		expect_u("relay disable action", a, PROXY_RELAY_DISABLE);
-		expect_true("relay disable ack echoes", memcmp(ack, di, 3) == 0);
+		/* relay enable: opcode 0x01, payload[0]=1 */
+		build_cmd(pkt, PROXY_OP_RELAY, (uint8_t[]){ 1 }, 1);
+		expect_u("relay enable kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_RELAY_ENABLE);
+		expect_u("relay enable ack len", cmd.ack_len, PROXY_CMD_PACKET_LEN);
+		expect_true("relay enable ack echoes",
+			    memcmp(cmd.ack, pkt, PROXY_CMD_PACKET_LEN) == 0);
 
-		/* bad checksum -> NONE (falls through to forward) */
-		uint8_t badck[] = { 0x22, 0x01, 0x99 };
-		a = proxy_relay_parse(badck, sizeof(badck), ack, sizeof(ack), &ack_len);
-		expect_u("relay bad checksum", a, PROXY_RELAY_NONE);
+		/* relay disable: opcode 0x01, payload[0]=0 */
+		build_cmd(pkt, PROXY_OP_RELAY, (uint8_t[]){ 0 }, 1);
+		expect_u("relay disable kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_RELAY_DISABLE);
+
+		/* relay out-of-range state -> INVALID (framed, so NOT forwarded) */
+		build_cmd(pkt, PROXY_OP_RELAY, (uint8_t[]){ 5 }, 1);
+		expect_u("relay bad state kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_INVALID);
+		expect_u("relay bad state no ack", cmd.ack_len, 0);
+
+		/* set baud 115200 = 0x0001C200, little-endian payload */
+		build_cmd(pkt, PROXY_OP_BAUD,
+			  (uint8_t[]){ 0x00, 0xC2, 0x01, 0x00 }, 4);
+		expect_u("baud set kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_SET_BAUD);
+		expect_u("baud set value", cmd.baud, 115200);
+		expect_u("baud set ack len", cmd.ack_len, PROXY_CMD_PACKET_LEN);
+
+		/* set baud 1200 = 0x000004B0 */
+		build_cmd(pkt, PROXY_OP_BAUD,
+			  (uint8_t[]){ 0xB0, 0x04, 0x00, 0x00 }, 4);
+		expect_u("baud 1200 kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_SET_BAUD);
+		expect_u("baud 1200 value", cmd.baud, 1200);
+
+		/* unsupported baud 250000 = 0x0003D090 -> INVALID */
+		build_cmd(pkt, PROXY_OP_BAUD,
+			  (uint8_t[]){ 0x90, 0xD0, 0x03, 0x00 }, 4);
+		expect_u("baud unsupported kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_INVALID);
+		expect_u("baud unsupported no ack", cmd.ack_len, 0);
+
+		/* unknown opcode, valid framing -> INVALID */
+		build_cmd(pkt, 0x7F, NULL, 0);
+		expect_u("unknown opcode kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_INVALID);
+
+		/* bad checksum -> NONE (falls through to forward as data) */
+		build_cmd(pkt, PROXY_OP_RELAY, (uint8_t[]){ 1 }, 1);
+		pkt[PROXY_CMD_PACKET_LEN - 1] ^= 0xFF;
+		expect_u("bad checksum kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_NONE);
 
 		/* wrong start byte -> NONE */
-		uint8_t badstart[] = { 0x59, 0x01, 0x5A };
-		a = proxy_relay_parse(badstart, sizeof(badstart), ack, sizeof(ack), &ack_len);
-		expect_u("relay wrong start", a, PROXY_RELAY_NONE);
+		build_cmd(pkt, PROXY_OP_RELAY, (uint8_t[]){ 1 }, 1);
+		pkt[0] = 0x59;
+		expect_u("wrong start kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_NONE);
 
-		/* wrong length -> NONE (start+checksum-shaped but 4 bytes) */
-		uint8_t longpkt[] = { 0x22, 0x01, 0x23, 0x00 };
-		a = proxy_relay_parse(longpkt, sizeof(longpkt), ack, sizeof(ack), &ack_len);
-		expect_u("relay wrong length", a, PROXY_RELAY_NONE);
+		/* wrong on-wire length -> NONE (a legacy 3-byte packet is data now) */
+		{
+			uint8_t shortpkt[] = { 0x22, 0x01, 0x23 };
+			expect_u("wrong length kind",
+				 proxy_cmd_parse(shortpkt, sizeof(shortpkt), &cmd),
+				 PROXY_CMD_NONE);
+		}
 
-		/* out-of-range state, checksum-valid -> NONE */
-		uint8_t badstate[] = { 0x22, 0x05, 0x27 };
-		a = proxy_relay_parse(badstate, sizeof(badstate), ack, sizeof(ack), &ack_len);
-		expect_u("relay bad state", a, PROXY_RELAY_NONE);
+		/* length byte not matching PACKET_LEN -> NONE */
+		build_cmd(pkt, PROXY_OP_RELAY, (uint8_t[]){ 1 }, 1);
+		pkt[1] = 0x0A;   /* claims 10 bytes; checksum now wrong too */
+		expect_u("length mismatch kind",
+			 proxy_cmd_parse(pkt, sizeof(pkt), &cmd),
+			 PROXY_CMD_NONE);
 	}
 
 	/* --- identity --- */

@@ -218,7 +218,7 @@ static bool bond_reset_requested(void)
  * "enabled"), so the overlay's GPIO_ACTIVE_HIGH/LOW decides the electrical
  * polarity — flip it there for an active-low (opto-isolated) relay module.
  *
- * The command that toggles this is parsed in proxy_core (proxy_relay_parse);
+ * The command that toggles this is parsed in proxy_core (proxy_cmd_parse);
  * relay_set() only applies the decision. Boot state is DISABLED — the motor
  * must never come up enabled on its own.
  */
@@ -250,9 +250,9 @@ static void relay_set(bool enable)
 	LOG_INF("Relay %s", enable ? "ENABLED" : "disabled");
 }
 
-/* Echo a relay command back to the phone (see relay_ack_send, defined after the
- * NUS send machinery it reuses). */
-static void relay_ack_send(struct bt_conn *conn, const uint8_t *ack, size_t len);
+/* Echo a device-control command back to the phone (see cmd_ack_send, defined
+ * after the NUS send machinery it reuses). */
+static void cmd_ack_send(struct bt_conn *conn, const uint8_t *ack, size_t len);
 
 /* --- BLE ----------------------------------------------------------------- */
 
@@ -757,18 +757,37 @@ static void nus_received(struct bt_conn *conn, const uint8_t *const data,
 		return;
 	}
 
-	/* Relay-control command? It targets *this* device, so act on it and echo
+	/* Device-control command? It targets *this* device, so act on it and echo
 	 * the packet back as an ack — do not forward it down the UART. proxy_core
-	 * validates the framing/checksum; only a fully valid packet is consumed
-	 * here, everything else falls through to the normal forward path. */
-	uint8_t ack[PROXY_RELAY_PACKET_LEN];
-	size_t ack_len = 0;
-	enum proxy_relay_action act =
-		proxy_relay_parse(data, len, ack, sizeof(ack), &ack_len);
+	 * validates the framing/checksum/opcode; only PROXY_CMD_NONE (not our
+	 * framing) falls through to the normal forward path. A framed-but-bad
+	 * packet (PROXY_CMD_INVALID) is consumed and dropped, never forwarded. */
+	struct proxy_cmd cmd;
 
-	if (act != PROXY_RELAY_NONE) {
-		relay_set(act == PROXY_RELAY_ENABLE);
-		relay_ack_send(conn, ack, ack_len);
+	switch (proxy_cmd_parse(data, len, &cmd)) {
+	case PROXY_CMD_NONE:
+		break;   /* not ours — fall through to the forward path below */
+	case PROXY_CMD_RELAY_ENABLE:
+		relay_set(true);
+		cmd_ack_send(conn, cmd.ack, cmd.ack_len);
+		return;
+	case PROXY_CMD_RELAY_DISABLE:
+		relay_set(false);
+		cmd_ack_send(conn, cmd.ack, cmd.ack_len);
+		return;
+	case PROXY_CMD_SET_BAUD:
+		/* Ack only on success, so the phone's echo means "the new rate is
+		 * live". On failure the old rate stays in effect (see
+		 * uart_bridge_set_baud) and the phone can re-send. */
+		if (uart_bridge_set_baud(cmd.baud) == 0) {
+			cmd_ack_send(conn, cmd.ack, cmd.ack_len);
+		} else {
+			LOG_ERR("UART baud change to %u failed",
+				(unsigned int)cmd.baud);
+		}
+		return;
+	case PROXY_CMD_INVALID:
+		LOG_WRN("Ignoring malformed device-control command");
 		return;
 	}
 
@@ -834,14 +853,14 @@ static void send_processed(struct bt_conn *conn, const uint8_t *data,
 	}
 }
 
-/* Echo a relay command back to the phone as an acknowledgement that the pin was
- * driven. Always a single short packet (PROXY_RELAY_PACKET_LEN bytes, well under
- * any ATT MTU), so no slicing — but a TX buffer can be momentarily unavailable,
- * so retry a few times using the same transient/drop classification as the data
- * path, then give up (the phone can re-send). Runs in the BT RX thread with a
- * live `conn` from the NUS callback; concurrent sends from ble_write_thread are
- * serialised by the GATT layer. */
-static void relay_ack_send(struct bt_conn *conn, const uint8_t *ack, size_t len)
+/* Echo a device-control command back to the phone as an acknowledgement that it
+ * took effect. Always a single short packet (PROXY_CMD_PACKET_LEN bytes, well
+ * under any ATT MTU), so no slicing — but a TX buffer can be momentarily
+ * unavailable, so retry a few times using the same transient/drop classification
+ * as the data path, then give up (the phone can re-send). Runs in the BT RX
+ * thread with a live `conn` from the NUS callback; concurrent sends from
+ * ble_write_thread are serialised by the GATT layer. */
+static void cmd_ack_send(struct bt_conn *conn, const uint8_t *ack, size_t len)
 {
 	for (int tries = 0; tries < 5; tries++) {
 		int err = bt_nus_send(conn, ack, len);
@@ -853,11 +872,11 @@ static void relay_ack_send(struct bt_conn *conn, const uint8_t *ack, size_t len)
 			k_sleep(K_MSEC(NUS_RETRY_DELAY_MS));
 			break;
 		case PROXY_SEND_DROP:
-			LOG_WRN("Relay ack not sent (err %d)", err);
+			LOG_WRN("Command ack not sent (err %d)", err);
 			return;
 		}
 	}
-	LOG_WRN("Relay ack dropped: no TX buffer after retries");
+	LOG_WRN("Command ack dropped: no TX buffer after retries");
 }
 
 static void ble_write_thread(void)
