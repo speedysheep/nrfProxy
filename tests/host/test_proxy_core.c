@@ -60,6 +60,48 @@ int main(void)
 	n = on_ble_rx(in, 5, out, sizeof(out));
 	expect_u("ble hook", n, 5);
 
+	/* --- relay command --- */
+	{
+		uint8_t ack[PROXY_RELAY_PACKET_LEN];
+		size_t ack_len;
+		enum proxy_relay_action a;
+
+		/* enable: 0x22 0x01 0x23 */
+		uint8_t en[] = { 0x22, 0x01, 0x23 };
+		memset(ack, 0, sizeof(ack));
+		ack_len = 0;
+		a = proxy_relay_parse(en, sizeof(en), ack, sizeof(ack), &ack_len);
+		expect_u("relay enable action", a, PROXY_RELAY_ENABLE);
+		expect_u("relay enable ack len", ack_len, PROXY_RELAY_PACKET_LEN);
+		expect_true("relay enable ack echoes", memcmp(ack, en, 3) == 0);
+
+		/* disable: 0x22 0x00 0x22 */
+		uint8_t di[] = { 0x22, 0x00, 0x22 };
+		a = proxy_relay_parse(di, sizeof(di), ack, sizeof(ack), &ack_len);
+		expect_u("relay disable action", a, PROXY_RELAY_DISABLE);
+		expect_true("relay disable ack echoes", memcmp(ack, di, 3) == 0);
+
+		/* bad checksum -> NONE (falls through to forward) */
+		uint8_t badck[] = { 0x22, 0x01, 0x99 };
+		a = proxy_relay_parse(badck, sizeof(badck), ack, sizeof(ack), &ack_len);
+		expect_u("relay bad checksum", a, PROXY_RELAY_NONE);
+
+		/* wrong start byte -> NONE */
+		uint8_t badstart[] = { 0x59, 0x01, 0x5A };
+		a = proxy_relay_parse(badstart, sizeof(badstart), ack, sizeof(ack), &ack_len);
+		expect_u("relay wrong start", a, PROXY_RELAY_NONE);
+
+		/* wrong length -> NONE (start+checksum-shaped but 4 bytes) */
+		uint8_t longpkt[] = { 0x22, 0x01, 0x23, 0x00 };
+		a = proxy_relay_parse(longpkt, sizeof(longpkt), ack, sizeof(ack), &ack_len);
+		expect_u("relay wrong length", a, PROXY_RELAY_NONE);
+
+		/* out-of-range state, checksum-valid -> NONE */
+		uint8_t badstate[] = { 0x22, 0x05, 0x27 };
+		a = proxy_relay_parse(badstate, sizeof(badstate), ack, sizeof(ack), &ack_len);
+		expect_u("relay bad state", a, PROXY_RELAY_NONE);
+	}
+
 	/* --- identity --- */
 	{
 		uint8_t hwid[8] = { 0x11, 0x22, 0x33, 0x44, 0x7A, 0x3F, 0x00, 0x00 };

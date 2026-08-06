@@ -209,6 +209,51 @@ static bool bond_reset_requested(void)
 	return true;
 }
 
+/* --- Relay control (motor enable) ---------------------------------------- */
+/*
+ * A GPIO the phone toggles over BLE to drive a relay (e.g. motor-enable). The
+ * pin is chosen per-board via the relay-control alias in the board overlay;
+ * GPIO_DT_SPEC_GET_OR falls back to a null spec so a board that omits the alias
+ * simply has no relay. Driven with *logical* levels (gpio_pin_set_dt(..,1) =
+ * "enabled"), so the overlay's GPIO_ACTIVE_HIGH/LOW decides the electrical
+ * polarity — flip it there for an active-low (opto-isolated) relay module.
+ *
+ * The command that toggles this is parsed in proxy_core (proxy_relay_parse);
+ * relay_set() only applies the decision. Boot state is DISABLED — the motor
+ * must never come up enabled on its own.
+ */
+static const struct gpio_dt_spec relay_gpio =
+	GPIO_DT_SPEC_GET_OR(DT_ALIAS(relay_control), gpios, {0});
+
+static void relay_init(void)
+{
+	if (relay_gpio.port == NULL) {
+		LOG_INF("No relay-control GPIO on this board");
+		return;   /* board defines no relay */
+	}
+	if (!gpio_is_ready_dt(&relay_gpio)) {
+		LOG_ERR("relay GPIO not ready");
+		return;
+	}
+	/* Start inactive: never enable the motor at boot. */
+	gpio_pin_configure_dt(&relay_gpio, GPIO_OUTPUT_INACTIVE);
+	LOG_INF("Relay-control GPIO ready (boot state: disabled)");
+}
+
+static void relay_set(bool enable)
+{
+	if (relay_gpio.port == NULL) {
+		LOG_WRN("Relay command ignored: no relay GPIO on this board");
+		return;
+	}
+	gpio_pin_set_dt(&relay_gpio, enable ? 1 : 0);
+	LOG_INF("Relay %s", enable ? "ENABLED" : "disabled");
+}
+
+/* Echo a relay command back to the phone (see relay_ack_send, defined after the
+ * NUS send machinery it reuses). */
+static void relay_ack_send(struct bt_conn *conn, const uint8_t *ack, size_t len);
+
 /* --- BLE ----------------------------------------------------------------- */
 
 #define DEVICE_NAME       CONFIG_BT_DEVICE_NAME
@@ -712,6 +757,21 @@ static void nus_received(struct bt_conn *conn, const uint8_t *const data,
 		return;
 	}
 
+	/* Relay-control command? It targets *this* device, so act on it and echo
+	 * the packet back as an ack — do not forward it down the UART. proxy_core
+	 * validates the framing/checksum; only a fully valid packet is consumed
+	 * here, everything else falls through to the normal forward path. */
+	uint8_t ack[PROXY_RELAY_PACKET_LEN];
+	size_t ack_len = 0;
+	enum proxy_relay_action act =
+		proxy_relay_parse(data, len, ack, sizeof(ack), &ack_len);
+
+	if (act != PROXY_RELAY_NONE) {
+		relay_set(act == PROXY_RELAY_ENABLE);
+		relay_ack_send(conn, ack, ack_len);
+		return;
+	}
+
 	/* Runs in the Bluetooth RX thread, one call at a time, so a static
 	 * scratch buffer is safe here and keeps it off the stack. */
 	static uint8_t proc_buf[PROC_BUF_SIZE];
@@ -772,6 +832,32 @@ static void send_processed(struct bt_conn *conn, const uint8_t *data,
 			return;
 		}
 	}
+}
+
+/* Echo a relay command back to the phone as an acknowledgement that the pin was
+ * driven. Always a single short packet (PROXY_RELAY_PACKET_LEN bytes, well under
+ * any ATT MTU), so no slicing — but a TX buffer can be momentarily unavailable,
+ * so retry a few times using the same transient/drop classification as the data
+ * path, then give up (the phone can re-send). Runs in the BT RX thread with a
+ * live `conn` from the NUS callback; concurrent sends from ble_write_thread are
+ * serialised by the GATT layer. */
+static void relay_ack_send(struct bt_conn *conn, const uint8_t *ack, size_t len)
+{
+	for (int tries = 0; tries < 5; tries++) {
+		int err = bt_nus_send(conn, ack, len);
+
+		switch (proxy_send_result(err)) {
+		case PROXY_SEND_CONSUMED:
+			return;
+		case PROXY_SEND_RETRY:
+			k_sleep(K_MSEC(NUS_RETRY_DELAY_MS));
+			break;
+		case PROXY_SEND_DROP:
+			LOG_WRN("Relay ack not sent (err %d)", err);
+			return;
+		}
+	}
+	LOG_WRN("Relay ack dropped: no TX buffer after retries");
 }
 
 static void ble_write_thread(void)
@@ -860,6 +946,7 @@ int main(void)
 	LOG_INF("nrfProxy: UART1 -> BLE NUS bridge starting");
 
 	leds_init();
+	relay_init();
 	k_work_init_delayable(&adv_slow_work, adv_slow_handler);
 	k_work_init_delayable(&adv_retry_work, adv_retry_handler);
 	k_work_init_delayable(&security_timeout_work, security_timeout_handler);

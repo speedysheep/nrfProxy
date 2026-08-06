@@ -36,6 +36,16 @@
 		/* Bond-reset button on the D2 pad (see the gpio-keys node
 		 * below). Hold to GND through boot ~3 s to wipe the pairing. */
 		bond-reset = &bond_reset_key;
+
+		/* Relay-control output the phone toggles over BLE (motor enable).
+		 * D3 / P0.29 is the only remaining free pad (D0/D1 = uart1,
+		 * D2 = bond-reset, D4/D5 = i2c1, D6/D7 = uart0, D8-D10 = spi2).
+		 * Active-high; use GPIO_ACTIVE_LOW for an active-low relay. */
+		relay-control = &relay_control;
+	};
+
+	relay_control: relay-control {
+		gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
 	};
 
 	/*

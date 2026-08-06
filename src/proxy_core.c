@@ -26,6 +26,42 @@ size_t on_ble_rx(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size
 	return n;
 }
 
+/* --- Relay-control command ------------------------------------------------ */
+
+/* 8-bit additive checksum over the packet's leading bytes. Trivial on purpose:
+ * the encrypted link, not this byte, is the security boundary — it only catches
+ * a corrupted or mis-framed write. */
+static uint8_t relay_checksum(uint8_t start, uint8_t state)
+{
+	return (uint8_t)(start + state);
+}
+
+enum proxy_relay_action proxy_relay_parse(const uint8_t *in, size_t in_len,
+					  uint8_t *ack, size_t ack_size,
+					  size_t *ack_len)
+{
+	if (in_len != PROXY_RELAY_PACKET_LEN || in[0] != PROXY_RELAY_START) {
+		return PROXY_RELAY_NONE;
+	}
+	if (in[2] != relay_checksum(in[0], in[1])) {
+		return PROXY_RELAY_NONE;
+	}
+	if (in[1] != 0 && in[1] != 1) {
+		return PROXY_RELAY_NONE;
+	}
+
+	/* Acknowledge with the exact bytes received, so the phone matches its
+	 * command against the echo. */
+	if (ack != NULL && ack_size >= PROXY_RELAY_PACKET_LEN) {
+		memcpy(ack, in, PROXY_RELAY_PACKET_LEN);
+		if (ack_len != NULL) {
+			*ack_len = PROXY_RELAY_PACKET_LEN;
+		}
+	}
+
+	return in[1] ? PROXY_RELAY_ENABLE : PROXY_RELAY_DISABLE;
+}
+
 /* --- Per-device identity -------------------------------------------------- */
 
 /* The two MSBs of the top address byte mark an address static-random. Mirrors
