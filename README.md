@@ -261,3 +261,32 @@ Zephyr auto-merges on top of `prj.conf`:
 For a logging-free **production** build on the XIAO (or Pro Micro), layer
 [`prod.conf`](prod.conf) on top via `EXTRA_CONF_FILE` — the `xiao_prod` / `promicro_prod` wrapper targets do this for you.
 
+This firmware supports a couple of commands that it acts upon directly as opposed to being passed to the motor. Packets with a 0x22 header (completely arbitrary, I just picked a random number) are for nrf board control. At present only two are supported.
+
+Every command is the same fixed 16-byte frame. The width is fixed so the format
+never has to grow again: a new control just takes a new **opcode** and reuses the
+spare payload bytes.
+
+| Offset  | Name     | Value                                             |
+|---------|----------|---------------------------------------------------|
+| `[0]`   | start    | `0x22` (fixed)                                    |
+| `[1]`   | length   | `0x10` (16) — declared length, must equal the frame |
+| `[2]`   | opcode   | which control (see below)                         |
+| `[3..14]` | payload | opcode-specific; **unused bytes must be `0x00`** |
+| `[15]`  | checksum | `sum(bytes[0..14]) & 0xFF`, 8-bit additive sum    |
+
+The checksum only guards against corruption / accidental framing — the security
+boundary is the encrypted BLE link, not this byte. Because `length` and the
+checksum both cover the whole frame, a stray 16-byte chunk of ordinary serial
+data is astronomically unlikely to be mistaken for a command.
+
+### Opcodes
+
+| Opcode | Name  | Payload                                                  |
+|--------|-------|----------------------------------------------------------|
+| `0x01` | RELAY | `payload[0]` = `0x00` disable / `0x01` enable the pin     |
+| `0x02` | BAUD  | `payload[0..3]` = new UART baud, **uint32 little-endian** |
+
+A successful packet receive is indicated by the nrf board returning the exact same packet data. 
+
+I should possibly have restricted this to one single packet, with both the enbable/disable controller data AND the baud rate as part of the "enable" packet. But I didn't think about the implementation too much until it was already done, so unless there's a good reason to change it I'll probably leave it as-is.
