@@ -52,6 +52,36 @@ States: `LOCKED`, `UNLOCKED`, `UNLOCKED_GRACE` (unlocked but the phone has gone 
 2. **Unlocked is never persisted.** `LOCKED` is the boot state unconditionally — that is the
    entire theft story. Only the *preference* (`auto_unlock`) persists (B6).
 
+### ⚠️ Deviation in the shipped code: a 60-second grace, not 10/30 minutes (2026-08-07)
+
+`lock_core.c` does not exist yet. What is implemented is the simple relay command
+(`RELAY_COMMAND.md`) plus a **single 60-second grace timer** in `main.c`
+(`RELAY_GRACE_MS`, `relay_grace_work`): `on_disconnected()` arms it, `on_security_changed()`
+cancels it when the owner reconnects encrypted, and on expiry the relay drops. So the *spirit*
+of rule 1 holds — a dropout never cuts assist instantly — but the shape is much simpler than the
+table above:
+
+| Table says | `main.c` does |
+|---|---|
+| Three states (`LOCKED`/`UNLOCKED`/`UNLOCKED_GRACE`) | One bool (`relay_enabled`) + one timer |
+| `RELOCK_GRACE_MS` = 10 min | `RELAY_GRACE_MS` = **60 s** |
+| `RELOCK_HARD_MS` = 30 min backstop | none — nothing to back off from |
+| Grace expiry checks `motion_known`/`moving` | no speed input exists yet, so no check |
+| Reconnect clears the deadline | same (cancelled on security level ≥ 2) |
+
+**Why 60 s and not 10 minutes.** The 10/30 figures are sized for the owner walking away with the
+phone; the actual requirement was narrower — survive radio interference. A reconnect costs the
+supervision timeout plus a rescan and re-encrypt, i.e. seconds, so a minute is generous margin
+while keeping a parked bike's exposure to one minute instead of thirty. Note the trap the longer
+figures hide: because `motion_known` is hardcoded false until workstream C lands, implementing
+the table verbatim today would relock at **`RELOCK_HARD_MS` (30 min)**, never at 10 — the
+stationary branch can never fire.
+
+Rule 2 holds exactly as written: the enable is never persisted, and boot is unconditionally off.
+
+If the full state machine is built later it belongs in `lock_core.c` per B1 — the `main.c` timer
+should be deleted then, not grown into a second implementation, and this note with it.
+
 "Known stationary" needs a speed signal, which only exists once workstream C can read the
 controller stream. Until then `motion_known` is always false and only the hard timeout applies.
 The input struct carries the field from day one so C plugs in without touching the state table.

@@ -177,6 +177,7 @@ Honest list. Nothing here is an accident.
 | **`main.c` wiring** | The policy *decisions* are unit-tested and the sequence tests replay real event orderings, but they model `main.c`'s callbacks. Nothing catches `main.c` wiring an event to the wrong callback | Only bsim closes this |
 | **TX in-progress flag under concurrency** | `uart_emul` offers no hook to stall or fail a transmit mid-flight, which is what opening the thread-vs-ISR race requires | Possibly, with a purpose-built fake async UART device |
 | **Slab starvation recovery** | The 4×64-byte RX slab exhausting and recovering via `uart_rx_retry` | Likely testable with `uart_emul` as-is — the most tractable gap here |
+| **Relay grace window** | `relay_grace_work` and its arm/cancel from `on_disconnected`/`on_security_changed` live in `main.c` — the "`main.c` wiring" gap above in concrete form. The parse side (`proxy_cmd_parse`) is host-tested, but nothing asserts that a dropout holds the pin for 60 s, that a reconnect cancels it, or that the handler's re-check wins the cancel race | Only bsim closes it in CI. If the grace ever moves into `lock_core.c` per `LOCK_PLAN.md` B1, it becomes host-testable — which is much of the argument for doing so. Until then: `RELAY_COMMAND.md` §"Quick test", steps 6–7 |
 | **Hardware behaviour** — pairing dialogs, real throughput, LED states, relay switching, actual boards | No hardware in CI, by choice | No; stays a manual checklist |
 | **Power consumption** | Needs instrumentation | No |
 

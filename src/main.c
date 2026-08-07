@@ -209,47 +209,6 @@ static bool bond_reset_requested(void)
 	return true;
 }
 
-/* --- Relay control (motor enable) ---------------------------------------- */
-/*
- * A GPIO the phone toggles over BLE to drive a relay (e.g. motor-enable). The
- * pin is chosen per-board via the relay-control alias in the board overlay;
- * GPIO_DT_SPEC_GET_OR falls back to a null spec so a board that omits the alias
- * simply has no relay. Driven with *logical* levels (gpio_pin_set_dt(..,1) =
- * "enabled"), so the overlay's GPIO_ACTIVE_HIGH/LOW decides the electrical
- * polarity — flip it there for an active-low (opto-isolated) relay module.
- *
- * The command that toggles this is parsed in proxy_core (proxy_cmd_parse);
- * relay_set() only applies the decision. Boot state is DISABLED — the motor
- * must never come up enabled on its own.
- */
-static const struct gpio_dt_spec relay_gpio =
-	GPIO_DT_SPEC_GET_OR(DT_ALIAS(relay_control), gpios, {0});
-
-static void relay_init(void)
-{
-	if (relay_gpio.port == NULL) {
-		LOG_INF("No relay-control GPIO on this board");
-		return;   /* board defines no relay */
-	}
-	if (!gpio_is_ready_dt(&relay_gpio)) {
-		LOG_ERR("relay GPIO not ready");
-		return;
-	}
-	/* Start inactive: never enable the motor at boot. */
-	gpio_pin_configure_dt(&relay_gpio, GPIO_OUTPUT_INACTIVE);
-	LOG_INF("Relay-control GPIO ready (boot state: disabled)");
-}
-
-static void relay_set(bool enable)
-{
-	if (relay_gpio.port == NULL) {
-		LOG_WRN("Relay command ignored: no relay GPIO on this board");
-		return;
-	}
-	gpio_pin_set_dt(&relay_gpio, enable ? 1 : 0);
-	LOG_INF("Relay %s", enable ? "ENABLED" : "disabled");
-}
-
 /* Echo a device-control command back to the phone (see cmd_ack_send, defined
  * after the NUS send machinery it reuses). */
 static void cmd_ack_send(struct bt_conn *conn, const uint8_t *ack, size_t len);
@@ -312,6 +271,130 @@ static bool link_secure;
  * adv_params_fast/slow(). Safe — single-writer bool; writes happen at boot
  * (pre-connection) or from pairing_complete while already connected. */
 static bool locked_mode;
+
+/* --- Relay control (motor enable) ---------------------------------------- */
+/*
+ * A GPIO the phone toggles over BLE to drive a relay (e.g. motor-enable). The
+ * pin is chosen per-board via the relay-control alias in the board overlay;
+ * GPIO_DT_SPEC_GET_OR falls back to a null spec so a board that omits the alias
+ * simply has no relay. Driven with *logical* levels (gpio_pin_set_dt(..,1) =
+ * "enabled"), so the overlay's GPIO_ACTIVE_HIGH/LOW decides the electrical
+ * polarity — flip it there for an active-low (opto-isolated) relay module.
+ *
+ * The command that toggles this is parsed in proxy_core (proxy_cmd_parse);
+ * relay_set() only applies the decision. Boot state is DISABLED — the motor
+ * must never come up enabled on its own, and the enabled state is never
+ * persisted, so it cannot survive a reboot.
+ *
+ * Lifetime: the relay is held while the phone that authorised it is on the link,
+ * plus a grace window after the link drops (relay_grace_start(), armed from
+ * on_disconnected; cancelled from on_security_changed when the owner comes back
+ * encrypted). This lives here, next to the connection state it reads, rather
+ * than up with the LEDs.
+ *
+ * This is deliberately *not* LOCK_PLAN.md's UNLOCKED_GRACE state — see the
+ * "Deviation" note in that file. It has no speed input and no hard backstop, and
+ * it is sized for a radio dropout rather than for the owner walking away.
+ */
+static const struct gpio_dt_spec relay_gpio =
+	GPIO_DT_SPEC_GET_OR(DT_ALIAS(relay_control), gpios, {0});
+
+/* Last state relay_apply() drove onto the pin. Guarded by conn_mutex: the relay
+ * is a function of link state, and the grace timer reads it on the system
+ * workqueue while the Bluetooth receive path writes it. */
+static bool relay_enabled;
+
+/* How long the relay survives a dropped link. Sized for radio interference, not
+ * for the owner leaving: a reconnect costs the supervision timeout plus a rescan
+ * and re-encrypt — seconds — so a minute is generous margin, while keeping the
+ * window in which a parked bike is still enabled short. LOCK_PLAN.md's 10/30
+ * minute figures answer a different question (the owner in a shop) and need the
+ * speed signal workstream C would provide. */
+#define RELAY_GRACE_MS 60000
+
+static struct k_work_delayable relay_grace_work;
+
+/* Drive the pin. Caller must hold conn_mutex. */
+static void relay_apply(bool enable)
+{
+	if (relay_gpio.port == NULL) {
+		LOG_WRN("Relay command ignored: no relay GPIO on this board");
+		return;
+	}
+	gpio_pin_set_dt(&relay_gpio, enable ? 1 : 0);
+	relay_enabled = enable;
+	LOG_INF("Relay %s", enable ? "ENABLED" : "disabled");
+}
+
+/* Apply an explicit command from the phone. It supersedes any pending grace
+ * release: an enable plainly does, and a disable makes the timer redundant. */
+static void relay_set(bool enable)
+{
+	k_work_cancel_delayable(&relay_grace_work);
+
+	k_mutex_lock(&conn_mutex, K_FOREVER);
+	relay_apply(enable);
+	k_mutex_unlock(&conn_mutex);
+}
+
+/* Grace window expired. The cancel in on_security_changed races this item
+ * starting (k_work_cancel_delayable does not wait for a handler already
+ * running), so the decision is re-checked here under the same mutex that
+ * publishes the link state. Without that re-check, a reconnect landing in the
+ * same instant could still lose the relay. */
+static void relay_grace_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	k_mutex_lock(&conn_mutex, K_FOREVER);
+	bool back = (current_conn != NULL) && link_secure;
+
+	if (!back && relay_enabled) {
+		relay_apply(false);
+	}
+	k_mutex_unlock(&conn_mutex);
+
+	if (back) {
+		LOG_INF("Relay grace lapsed but owner is back; relay kept");
+	} else {
+		LOG_INF("Relay grace expired; controller disabled");
+	}
+}
+
+/* The link that authorised the relay has gone. Don't cut the controller yet —
+ * start the grace window. A no-op (no timer, no log) on the overwhelmingly
+ * common disconnect where the relay was never enabled in the first place. */
+static void relay_grace_start(void)
+{
+	k_mutex_lock(&conn_mutex, K_FOREVER);
+	bool held = relay_enabled;
+	k_mutex_unlock(&conn_mutex);
+
+	if (!held) {
+		return;
+	}
+
+	LOG_INF("Link lost; holding relay %u s for a reconnect",
+		RELAY_GRACE_MS / 1000U);
+	k_work_reschedule(&relay_grace_work, K_MSEC(RELAY_GRACE_MS));
+}
+
+static void relay_init(void)
+{
+	relay_enabled = false;
+
+	if (relay_gpio.port == NULL) {
+		LOG_INF("No relay-control GPIO on this board");
+		return;   /* board defines no relay */
+	}
+	if (!gpio_is_ready_dt(&relay_gpio)) {
+		LOG_ERR("relay GPIO not ready");
+		return;
+	}
+	/* Start inactive: never enable the motor at boot. */
+	gpio_pin_configure_dt(&relay_gpio, GPIO_OUTPUT_INACTIVE);
+	LOG_INF("Relay-control GPIO ready (boot state: disabled)");
+}
 
 /* Not const: ad[1].data_len is set once at runtime from the resolved name. */
 static struct bt_data ad[] = {
@@ -627,6 +710,11 @@ static void on_security_changed(struct bt_conn *conn, bt_security_t level,
 		link_secure = true;
 		k_mutex_unlock(&conn_mutex);
 		k_work_cancel_delayable(&security_timeout_work);
+		/* The owner is back inside the grace window: keep the relay. Set
+		 * link_secure *first* — if the handler has already started and is
+		 * waiting on the mutex, its re-check is what actually saves the
+		 * relay, and it needs to observe the new state. */
+		k_work_cancel_delayable(&relay_grace_work);
 		/* Data was gated until now — wake the writer to flush. */
 		k_sem_give(&rx_data_ready);
 	}
@@ -698,6 +786,13 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	LOG_INF("Disconnected (reason %u)", reason);
+
+	/* The relay is only held while the authorising phone is on the link — but a
+	 * dropout gets RELAY_GRACE_MS to reconnect first, so radio interference
+	 * doesn't cut assist under a rider. This covers every way a link ends
+	 * (clean disconnect, out of range, supervision timeout, the security
+	 * watchdog below), because they all land here. */
+	relay_grace_start();
 
 	k_work_cancel_delayable(&security_timeout_work);
 
@@ -969,6 +1064,7 @@ int main(void)
 	k_work_init_delayable(&adv_slow_work, adv_slow_handler);
 	k_work_init_delayable(&adv_retry_work, adv_retry_handler);
 	k_work_init_delayable(&security_timeout_work, security_timeout_handler);
+	k_work_init_delayable(&relay_grace_work, relay_grace_handler);
 
 	/* Check the bond-reset button before bringing up BLE: held through boot,
 	 * it wipes the stored pairing (applied after settings_load below). */

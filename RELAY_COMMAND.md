@@ -51,6 +51,11 @@ data is astronomically unlikely to be mistaken for a command.
 Drives the motor-enable relay GPIO. `payload[0]` is `0x00` (disable) or `0x01`
 (enable); any other value is refused.
 
+**The enable is tied to the BLE connection.** See
+[Relay lifetime](#relay-lifetime-the-enable-is-tied-to-the-link-with-a-60-second-grace)
+below — the firmware releases the relay 60 s after the link drops, unless the
+phone reconnects and re-encrypts inside that window.
+
 #### BAUD (`0x02`)
 
 Reconfigures UART1's baud rate on the fly, for switching between motor
@@ -107,6 +112,48 @@ follows it unconditionally (`main.c`). Nothing downstream of the pin is verified
 either. If a caller needs "there is a relay here", that has to become its own
 opcode; it cannot be inferred from the ack.
 
+## Relay lifetime: the enable is tied to the link, with a 60-second grace
+
+The relay is held while the phone that authorised it is connected — **plus a
+60-second grace window after the link drops**, so that ordinary radio
+interference doesn't cut assist under a rider.
+
+| Event | Relay |
+|---|---|
+| Boot / reset / power loss | **off** — always, unconditionally |
+| RELAY command, `payload[0] = 0x01`, link encrypted | **on** |
+| RELAY command, `payload[0] = 0x00` | **off**, immediately |
+| BLE disconnect (any cause) | **stays on**, 60 s countdown starts |
+| Reconnect + link encrypted, inside those 60 s | **stays on**, countdown cancelled |
+| 60 s elapse with no encrypted link | **off** |
+
+"Any cause" is literal: a clean disconnect from the app, the phone going out of
+range or its battery dying (supervision timeout), or the security watchdog
+dropping a link that never encrypted. They all arrive at `on_disconnected()` in
+`main.c`, which arms `relay_grace_work`. The countdown is cancelled from
+`on_security_changed()` — note that it takes an **encrypted** link to save the
+relay, not merely a connection, so a link that reconnects but fails to pair still
+loses it when the window expires.
+
+The grace is a plain timer, not a persisted state: a reset inside the window
+still comes up disabled, because the enable is never written to flash.
+
+Three consequences worth designing the app around:
+
+- **The app should re-send the enable after a reconnect** rather than assume the
+  relay survived. It's harmless if it did (the command is idempotent, and it
+  cancels any pending grace release), and necessary if the window had expired.
+  The ack echo is what confirms the actual state.
+- **A reconnect that stalls on pairing does not save the relay.** If the app has
+  to re-bond, that has to complete inside the 60 s.
+- 60 s is a deliberate choice, not the figure in `LOCK_PLAN.md` — that document
+  specifies a 10-minute grace with a 30-minute backstop, for a different scenario
+  (the owner walking away with the phone). See the Deviation note there for why
+  this is shorter, and what it would take to implement the full version.
+
+To change the window, edit `RELAY_GRACE_MS` in `main.c`; nothing else depends on
+the value.
+
 ## Pin per board (RELAY opcode)
 
 Boot state is always **disabled** (pin inactive); the motor is never enabled on
@@ -141,3 +188,11 @@ it needs no board GPIO.
 5. **Set 9600 baud:** write
    `22 10 02 80 25 00 00 00 00 00 00 00 00 00 00 D9` → UART1 switches to 9600 and
    the frame is echoed. (`0xD9` = `0x22 + 0x10 + 0x02 + 0x80 + 0x25`.)
+6. **Check the grace window:** enable the relay again (step 3), then
+   **disconnect** in nRF Connect. The pin must **stay high**, with
+   `Link lost; holding relay 60 s for a reconnect` in the log — then go low about
+   a minute later with `Relay grace expired; controller disabled`.
+7. **Check the reconnect saves it:** repeat step 6, but reconnect and re-pair
+   within the minute. The pin never drops, and the log shows no expiry line.
+   (Cancelling is bound to *encryption*, not connection — reconnecting without
+   completing pairing will still lose the relay at the deadline.)

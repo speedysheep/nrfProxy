@@ -110,8 +110,8 @@ apps.
 - `RELAY_COMMAND.md` — the phone→device **device-control command** (fixed 16-byte framed
   packet, `0x22`/length/opcode/payload/checksum): opcode `0x01` toggles the motor-enable
   relay GPIO, opcode `0x02` changes the UART baud (uint32 LE, allow-listed 1200..115200),
-  plus the echo-back ack and per-board relay pin. Fixed width so new controls just add an
-  opcode. User-facing "what to send"; the firmware side is in `proxy_core.c`
+  plus the echo-back ack, the relay-lifetime rules and per-board relay pin. Fixed width so
+  new controls just add an opcode. User-facing "what to send"; the firmware side is in `proxy_core.c`
   (`proxy_cmd_parse`/`proxy_baud_supported`) + `main.c` (`relay_set`/`cmd_ack_send`) +
   `uart_bridge.c` (`uart_bridge_set_baud`) and the `relay-control` alias in each board overlay.
 - `TODO.md` — code-review findings ranked by severity, with what was fixed.
@@ -419,7 +419,24 @@ write whose framing doesn't validate falls through to the normal forward path. T
 quiesces RX/TX and drops any in-flight bytes (fine — the peer just switched too). The wire
 format and per-board relay pin are documented in `RELAY_COMMAND.md`; the parse/validation is
 pure logic in `proxy_core.c` (host-tested), the GPIO/baud/ack live in `main.c` +
-`uart_bridge.c`. Because `uart_tx()` allows only one transfer in flight, `uart_tx_kick()`
+`uart_bridge.c`.
+
+**The relay is held while the authorising phone is connected, plus a 60 s grace after the link
+drops** (`RELAY_GRACE_MS`). `on_disconnected` arms `relay_grace_work`; `on_security_changed`
+cancels it when the owner reconnects **encrypted** (a mere reconnect is not enough); on expiry
+the pin drops. The grace exists so radio interference doesn't cut assist mid-ride — every way a
+link ends lands in `on_disconnected`, so without it a momentary dropout killed the motor. The
+enable is never persisted, so boot is unconditionally disabled.
+- **This is not `LOCK_PLAN.md`'s `UNLOCKED_GRACE`** — that specifies 10 min + a 30 min backstop
+  and a three-state machine in a `lock_core.c` that doesn't exist. See the "Deviation" note in
+  that file, which also records the trap in the longer figures: `motion_known` is hardcoded
+  false until workstream C, so implementing the table verbatim would relock at 30 min, never 10.
+- **`relay_enabled` is guarded by `conn_mutex`** (not lock-free as an earlier revision had it):
+  the grace timer reads it on the **system workqueue** while the Bluetooth receive path writes
+  it. `k_work_cancel_delayable` does not wait for an already-running handler, so
+  `relay_grace_handler` **re-checks `current_conn`/`link_secure` under the mutex** — that
+  re-check, not the cancel, is what saves the relay when a reconnect lands in the same instant.
+  The relay block therefore lives next to the connection state it reads, not up with the LEDs. Because `uart_tx()` allows only one transfer in flight, `uart_tx_kick()`
 stages one contiguous chunk in `uart_tx_buf` and the next chunk is started from the
 `UART_TX_DONE` event. The in-progress flag is guarded with `irq_lock` so kicks from thread
 and ISR don't double-start.
